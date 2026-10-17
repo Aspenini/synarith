@@ -1,0 +1,11 @@
+[package]
+name = "synarith-cpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+synarith-core.workspace = true
+rayon.workspace = true
+

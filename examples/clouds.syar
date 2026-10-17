@@ -1,0 +1,10 @@
+syar 1;
+// A continuous, moving fractal cloud field. Render at any resolution.
+seed 42;
+param speed: float = 0.2;
+param scale: float = 6.0;
+param shadow: color = srgb("#13254b");
+param light: color = srgb("#f4c879");
+let position = p * scale + vec2(t * speed, 0.0);
+let clouds = fbm(position, octaves: 6);
+output main = mix(shadow, light, clouds);

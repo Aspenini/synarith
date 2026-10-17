@@ -1,0 +1,13 @@
+[package]
+name = "synarith-gpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+synarith-core.workspace = true
+synarith-cpu.workspace = true
+wgpu.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true

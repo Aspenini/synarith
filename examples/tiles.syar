@@ -1,0 +1,12 @@
+syar 1;
+seed 719;
+param spacing: vec2 = vec2(0.2, 0.2);
+param ink: color = srgb("#55ebcc");
+group tile(q: vec2, color: color) -> color {
+    let edges = rounded_box(q, size: vec2(0.075, 0.075), radius: 0.02);
+    return fill(edges, color);
+}
+let lattice = repeat(rotate(p - vec2(0.5, 0.5), 0.3), spacing);
+let pattern = tile(lattice, ink);
+let grain = fbm(p * 18.0);
+output main = over(pattern, mix(srgb("#101831"), srgb("#36426a"), grain));

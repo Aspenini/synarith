@@ -1,0 +1,11 @@
+# Keep source and procedural documents consistent across Windows, Linux, and macOS.
+* text=auto eol=lf
+
+# Image assets must never undergo text conversion.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.bmp binary
+*.tga binary
+*.ppm binary
+*.zip binary

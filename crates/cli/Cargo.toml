@@ -1,0 +1,21 @@
+[package]
+name = "synarith-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "syar"
+path = "src/main.rs"
+
+[features]
+default = ["gpu"]
+gpu = ["synarith/gpu"]
+
+[dependencies]
+synarith = { path = "../synarith", default-features = false }
+clap.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+

@@ -1,0 +1,29 @@
+[workspace]
+resolver = "3"
+members = ["crates/core", "crates/cpu", "crates/gpu", "crates/synarith", "crates/cli", "crates/viewer"]
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.89"
+
+[workspace.dependencies]
+synarith-core = { path = "crates/core" }
+synarith-cpu = { path = "crates/cpu" }
+synarith-gpu = { path = "crates/gpu" }
+synarith = { path = "crates/synarith" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rayon = "1.10"
+png = "0.17"
+tempfile = "3"
+clap = { version = "4.5", features = ["derive"] }
+wgpu = { version = "24", default-features = false, features = ["wgsl", "dx12", "metal"] }
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
+image = { version = "=0.25.9", default-features = false, features = ["jpeg", "bmp", "tga", "pnm"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+

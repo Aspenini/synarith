@@ -1,0 +1,28 @@
+syar 1;
+// The Mandelbrot set: z starts at zero and repeatedly becomes z² + c.
+// Render: syar render examples/mandelbrot.syar -o mandelbrot.png --width 1400 --height 1000 --samples 2
+// Detail: --param 'center=vec2(-0.75,0.1)' --param zoom=12.0 --param iterations=512
+// Animate: syar animate examples/mandelbrot.syar -o frames --frames 300 --fps 30 --width 700 --height 500
+// Palette cycles every ten seconds; set cycle_speed=0.0 to keep colors still.
+viewbox (-1.75, -1.25, 3.5, 2.5);
+
+param center: vec2 = vec2(-0.5, 0.0);
+param zoom: float = 1.0;
+param iterations: int = 192;
+param bands: float = 6.0;
+param cycle_speed: float = 0.1;
+param interior: color = srgb("#050911");
+
+let coordinate = p / max(zoom, 0.0001) + center;
+let escape = mandelbrot(coordinate, iterations: iterations);
+let phase = fract(escape * bands - t * cycle_speed);
+let exterior = ramp(
+    phase,
+    a: srgb("#0b153a"),
+    b: srgb("#286aac"),
+    c: srgb("#ffd79a"),
+    d: srgb("#0b153a"),
+    p1: 0.25,
+    p2: 0.65
+);
+output main = select(escape >= 1.0, interior, exterior);

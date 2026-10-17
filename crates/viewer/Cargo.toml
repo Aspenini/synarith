@@ -1,0 +1,21 @@
+[package]
+name = "synarith-viewer"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "syar-view"
+path = "src/main.rs"
+
+[dependencies]
+png.workspace = true
+tempfile.workspace = true
+
+[build-dependencies]
+cc = "1"
+
+[target.'cfg(target_os = "linux")'.build-dependencies]
+pkg-config = "0.3"
+
