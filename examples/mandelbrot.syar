@@ -1,4 +1,5 @@
 syar 1;
+use std;
 // The Mandelbrot set: z starts at zero and repeatedly becomes z² + c.
 // Render: syar render examples/mandelbrot.syar -o mandelbrot.png --width 1400 --height 1000 --samples 2
 // Detail: --param 'center=vec2(-0.75,0.1)' --param zoom=12.0 --param iterations=512
@@ -12,6 +13,25 @@ param iterations: int = 192;
 param bands: float = 6.0;
 param cycle_speed: float = 0.1;
 param interior: color = srgb("#050911");
+
+// Mandelbrot is ordinary Synarith code: no fractal-specific runtime operation.
+// Keep the original radius-16 escape test and smooth normalized escape count.
+fn mandelbrot(c: vec2, iterations: int) -> float {
+    let step_count = int(clamp(float(iterations), 1.0, 1024.0));
+    var z = vec2(0, 0);
+    for i in 0..1024 {
+        if i >= step_count { break; }
+        z = vec2(x(z) * x(z) - y(z) * y(z) + x(c),
+                 2.0 * x(z) * y(z) + y(c));
+        let squared_radius = x(z) * x(z) + y(z) * y(z);
+        if squared_radius > 256.0 {
+            let log2_radius = log(0.5 * log(squared_radius)) / log(2.0);
+            let smooth = float(i) + 2.0 - log2_radius;
+            return clamp(smooth / float(step_count), 0.0, 0.999999);
+        }
+    }
+    return 1.0;
+}
 
 let coordinate = p / max(zoom, 0.0001) + center;
 let escape = mandelbrot(coordinate, iterations: iterations);

@@ -7,10 +7,10 @@
 //!
 //! | Command | Behavior |
 //! | --- | --- |
-//! | `validate FILE` | Parse, type-check, validate every group, report graph size |
-//! | `fmt FILE` | Print conservative formatting; `--write` edits, `--check` checks |
+//! | `validate FILE` | Parse, type-check, validate all groups/functions and loop budgets, report graph size |
+//! | `fmt FILE` | Print conservative formatting; `--write` edits, `--check` checks; `--expand-std` embeds source-library helpers |
 //! | `inspect FILE` | Print parameter defaults, outputs, seed, view box, and graph details as JSON |
-//! | `inspect --operations` | Print the complete operation registry as JSON |
+//! | `inspect --operations` | Print the native core operation registry as JSON |
 //! | `render FILE -o FILE.png` | Render a still |
 //! | `animate FILE -o DIRECTORY` | Render numbered PNG frames |
 //!
@@ -26,8 +26,11 @@
 //! axis. PNG/BMP/TGA retain alpha; JPEG/PPM composite over white in linear light.
 //! Animation continues to write PNG sequences.
 //!
-//! `syar-view [FILE.syar] [--cli PATH]` launches the optional standalone native
-//! viewer. It calls the CLI for preview and export, and embeds no image renderer.
+//! `syar-view [FILE.syar] [--paused]` launches the egui live viewer. It renders
+//! directly through the Rust library, watches source changes, plays time expressions
+//! continuously, and supports smooth mathematical zoom/pan and still exports.
+//! Scroll/pinch to zoom, drag to pan, Space to play/pause, R to restart, 0 to fit.
+//! Camera navigation uses f64; evaluated language coordinates retain f32 precision.
 //!
 //! Examples:
 //!

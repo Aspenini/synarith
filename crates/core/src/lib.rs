@@ -3,11 +3,13 @@
 //! Read the [format guide](mod@format) for the `.syar` language. [`parse`] retains the
 //! original source in a [`Document`], including comments and ignored legacy layout
 //! metadata. [`compile`] resolves names, checks types and resource bounds, rejects
-//! cycles, and expands reusable groups into a typed acyclic [`Program`].
+//! cycles, and expands reusable groups into a typed [`Program`]. Mathematical
+//! functions compile to structured control flow with bounded iteration and
+//! sample-local state; expression and call graphs remain acyclic.
 //!
 //! ```
 //! use synarith_core::{compile, parse};
-//! let document = parse("syar 1;param radius:float=0.2;output main=fill(circle(p,radius));")?;
+//! let document = parse("syar 1;use std;param radius:float=0.2;output main=fill(circle(p,radius));")?;
 //! let program = compile(&document)?;
 //! assert_eq!(program.parameters[0].name, "radius");
 //! assert!(program.outputs.contains_key("main"));
@@ -34,10 +36,14 @@
 #![deny(missing_docs)]
 
 mod compiler;
+mod execution;
 pub mod format;
 mod language;
 mod registry;
+mod standard;
 
 pub use compiler::*;
+pub use execution::*;
 pub use language::*;
 pub use registry::*;
+pub use standard::*;

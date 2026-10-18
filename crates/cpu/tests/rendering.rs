@@ -1,7 +1,7 @@
 use synarith_core::*;
 use synarith_cpu::*;
 fn program(s: &str) -> Program {
-    compile(&parse(&format!("syar 1;{s}")).unwrap()).unwrap()
+    compile(&parse(&format!("syar 1;use std;{s}")).unwrap()).unwrap()
 }
 fn image(s: &str) -> Vec<Pixel> {
     render(
@@ -16,7 +16,18 @@ fn image(s: &str) -> Vec<Pixel> {
 }
 #[test]
 fn mandelbrot_escape_membership_iteration_bounds_and_palette_loop() {
-    let p = program("param iterations:int=128;output main=rgba(mandelbrot(p,iterations),0,0);");
+    let source = include_str!("../../../examples/mandelbrot.syar");
+    let document = parse(source).unwrap();
+    let definition = &document
+        .functions
+        .iter()
+        .find(|f| f.name == "mandelbrot")
+        .unwrap();
+    let definition = &source[definition.span.start..definition.span.end];
+    let p = program(&format!(
+        "{definition}param iterations:int=128;output main=rgba(mandelbrot(p,iterations),0,0);"
+    ));
+    assert_eq!(p.functions.len(), 1);
     let value = |point, iterations| {
         sample(&p, "main", point, 0., &[Value::int(iterations)], None, 0.)
             .unwrap()
@@ -33,8 +44,7 @@ fn mandelbrot_escape_membership_iteration_bounds_and_palette_loop() {
     assert_eq!(value([1., 0.], 0), value([1., 0.], 1));
     assert_eq!(value([1., 0.], 2048), value([1., 0.], 1024));
 
-    let example =
-        compile(&parse(include_str!("../../../examples/mandelbrot.syar")).unwrap()).unwrap();
+    let example = compile(&document).unwrap();
     let parameters = example.defaults();
     for point in [[-1.5, 0.1], [1., 0.5], [0., 0.]] {
         let first = sample(&example, "main", point, 0., &parameters, None, 0.)
@@ -166,7 +176,7 @@ fn antialiasing_and_viewbox_letterboxing() {
 }
 #[test]
 fn lazy_sampling_uses_procedural_sources() {
-    let base = program("let paint=rgba(x(p),y(p),0);output main=transform(paint,p+vec2(0.2,0.3));");
+    let base = program("let paint=rgba(x(p),y(p),0);output main=sample_at(paint,p+vec2(0.2,0.3));");
     let v = sample(&base, "main", [0.1, 0.2], 0., &[], None, 0.).unwrap();
     assert!((v.data[0] - 0.3).abs() < 1e-6);
     assert_eq!(v.data[1], 0.5);

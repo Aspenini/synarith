@@ -31,6 +31,9 @@ enum Command {
         file: PathBuf,
         #[arg(long)]
         check: bool,
+        /// Embed the required standard-library definitions as standalone source.
+        #[arg(long)]
+        expand_std: bool,
         #[arg(long)]
         write: bool,
     },
@@ -51,9 +54,6 @@ enum Command {
         /// JPEG quality, from 1 through 100.
         #[arg(long, default_value_t = 90, value_parser = clap::value_parser!(u8).range(1..=100))]
         quality: u8,
-        /// Private staging directory on the destination filesystem (viewer integration).
-        #[arg(long, hide = true)]
-        staging_directory: Option<PathBuf>,
         #[command(flatten)]
         render: RenderArgs,
     },
@@ -113,18 +113,32 @@ fn run() -> Result<(), String> {
         Command::Validate { file } => {
             let program = load(&read(&file)?).map_err(|e| e.to_string())?;
             println!(
-                "valid: {} nodes, {} parameters, {} outputs",
+                "valid: {} nodes, {} parameters, {} outputs, {} functions",
                 program.nodes.len(),
                 program.parameters.len(),
-                program.outputs.len()
+                program.outputs.len(),
+                program.functions.len()
             );
         }
-        Command::Fmt { file, check, write } => {
+        Command::Fmt {
+            file,
+            check,
+            write,
+            expand_std,
+        } => {
             if check && write {
                 return Err("--check and --write are mutually exclusive".into());
             }
             let source = read(&file)?;
-            let formatted = format_source(&source).map_err(|e| e.to_string())?;
+            let expanded;
+            let input = if expand_std {
+                expanded = expand_standard_library(&parse(&source).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+                &expanded
+            } else {
+                &source
+            };
+            let formatted = format_source(input).map_err(|e| e.to_string())?;
             if check {
                 if formatted != source {
                     return Err("document needs formatting".into());
@@ -144,7 +158,7 @@ fn run() -> Result<(), String> {
             } else {
                 let file = file.ok_or("provide a file or --operations")?;
                 let program = load(&read(&file)?).map_err(|e| e.to_string())?;
-                serde_json::json!({"version":1,"viewbox":program.viewbox,"seed":program.seed,"nodes":program.nodes.len(),"estimated_cost":program.estimated_cost,"outputs":program.outputs.keys().collect::<Vec<_>>(),"parameters":program.parameters.iter().map(|p|serde_json::json!({"name":p.name,"type":p.ty,"default":p.default})).collect::<Vec<_>>()})
+                serde_json::json!({"version":1,"viewbox":program.viewbox,"seed":program.seed,"nodes":program.nodes.len(),"estimated_cost":program.estimated_cost,"outputs":program.outputs.keys().collect::<Vec<_>>(),"parameters":program.parameters.iter().map(|p|serde_json::json!({"name":p.name,"type":p.ty,"default":p.default})).collect::<Vec<_>>(),"functions":program.functions.iter().map(|f|serde_json::json!({"name":f.name,"parameters":f.parameters.iter().map(|(name,ty)|serde_json::json!({"name":name,"type":ty})).collect::<Vec<_>>(),"result":f.result,"locals":f.locals.len()})).collect::<Vec<_>>()})
             };
             println!("{}", serde_json::to_string_pretty(&value).unwrap());
         }
@@ -153,7 +167,6 @@ fn run() -> Result<(), String> {
             output,
             format,
             quality,
-            staging_directory,
             render: args,
         } => {
             let program = load(&read(&file)?).map_err(|e| e.to_string())?;
@@ -162,27 +175,7 @@ fn run() -> Result<(), String> {
                 .map(Ok)
                 .unwrap_or_else(|| ImageFormat::from_path(&output))?;
             let mut renderer = Renderer::with_backend(program, args.backend)?;
-            let result = (|| {
-                if let Some(directory) = staging_directory {
-                    if output.exists() && !args.force {
-                        return Err(format!("{} already exists", output.display()));
-                    }
-                    let temporary = tempfile::NamedTempFile::new_in(directory)
-                        .map_err(|e| e.to_string())?
-                        .into_temp_path();
-                    renderer.export_image(&options, &temporary, format, quality, true)?;
-                    if args.force {
-                        temporary.persist(&output).map_err(|e| e.to_string())?;
-                    } else {
-                        temporary
-                            .persist_noclobber(&output)
-                            .map_err(|e| e.to_string())?;
-                    }
-                    Ok(())
-                } else {
-                    renderer.export_image(&options, &output, format, quality, args.force)
-                }
-            })();
+            let result = renderer.export_image(&options, &output, format, quality, args.force);
             for warning in renderer.take_warnings() {
                 eprintln!("warning: {warning}");
             }

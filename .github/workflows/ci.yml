@@ -1,0 +1,71 @@
+name: Build and verify
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+jobs:
+  platforms:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    env:
+      CARGO_INCREMENTAL: "0"
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux window dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential pkg-config libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxkbcommon-dev libwayland-dev libgl1-mesa-dev libegl1-mesa-dev xvfb mesa-vulkan-drivers xdg-desktop-portal
+      - run: cargo fetch --locked
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo doc --workspace --no-deps --locked
+      - run: cargo test --workspace --locked
+      - run: cargo test -p synarith -p synarith-cli --no-default-features --locked
+      - run: cargo build --release --locked
+      - name: Check egui viewer playback, zoom, and export (Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a target/release/syar-view --smoke-test examples/mandelbrot.syar --snapshot target/viewer.png --export-test target/viewer-export.png
+      - name: Check egui viewer playback, zoom, and export (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath ./target/release/syar-view.exe -ArgumentList @('--smoke-test', 'examples/mandelbrot.syar', '--snapshot', 'target/viewer.png', '--export-test', 'target/viewer-export.png') -WindowStyle Hidden -Wait -PassThru
+          if ($process.ExitCode -ne 0) { exit $process.ExitCode }
+      - name: Check egui viewer playback, zoom, and export (macOS)
+        if: runner.os == 'macOS'
+        run: target/release/syar-view --smoke-test examples/mandelbrot.syar --snapshot target/viewer.png --export-test target/viewer-export.png
+      - uses: actions/upload-artifact@v4
+        with:
+          name: synarith-${{ runner.os }}
+          path: |
+            target/release/syar
+            target/release/syar.exe
+            target/release/syar-view
+            target/release/syar-view.exe
+            target/doc/
+            examples/
+            assets/
+            crates/stdlib/src/standard.syar
+            README.md
+            LICENSE-MIT
+            LICENSE-APACHE
+          if-no-files-found: error
+  gpu:
+    runs-on: ubuntu-latest
+    env:
+      SYAR_REQUIRE_GPU: "1"
+      WGPU_BACKEND: vulkan
+      XDG_RUNTIME_DIR: /tmp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libvulkan1 mesa-vulkan-drivers
+      - run: cargo test -p synarith-gpu --locked -- --nocapture

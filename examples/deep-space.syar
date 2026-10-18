@@ -1,0 +1,142 @@
+syar 1;
+use std;
+// THE HALCYON REACH — a procedural, widescreen space wallpaper.
+// Every cloud, ring, planet, and star is synthesized from arithmetic.
+// The nebula is integrated through depth slices by a user-written algorithm.
+// Render: syar render examples/deep-space.syar -o space.png --width 3840 --height 2160 --samples 2
+viewbox(-1.6, -0.9, 3.2, 1.8);
+seed 83127;
+param exposure: float = 1.2;
+param detail: int = 6;
+param nebula_density: float = 1.0;
+
+fn filaments(q: vec2) -> float {
+    var z = q;
+    var energy = 0.0;
+    var weight = 0.52;
+    for octave in 0..8 {
+        if octave >= detail { break; }
+        z = rotate(z * 1.72, 0.63) + vec2(1.91, 0.73);
+        z += sin(vec2(y(z), x(z)) * 1.25) * 0.36;
+        let strand = exp(-abs(sin(x(z)) + cos(y(z))) * 5.5);
+        energy += strand * weight;
+        weight *= 0.53;
+    }
+    return energy;
+}
+
+fn nebula(q: vec2, phase: float) -> color {
+    var transmission = 1.0;
+    var r = 0.0;
+    var g = 0.0;
+    var b = 0.0;
+    // Front-to-back emission/absorption integration, without stored voxel data.
+    for slice in 0..20 {
+        let depth = float(slice) / 19.0;
+        let uv = rotate(q - vec2(0.35, -0.02), -0.38)
+            + vec2(depth * 0.42, sin(phase + depth * 5.0) * 0.045);
+        let ribbon = y(uv) + sin(x(uv) * 2.1 + depth * 1.1) * 0.17;
+        let envelope = exp(-ribbon * ribbon * 8.5) * exp(-x(uv) * x(uv) * 0.19);
+        let clouds = fbm(uv * 2.7 + vec2(depth * 2.3, depth * 1.7), octaves: 5, seed: 42);
+        let strands = filaments(uv * 3.2 + vec2(depth * 0.6, depth * 0.2));
+        let dust = smoothstep(0.32, 0.67, clouds);
+        let density = envelope * dust * (0.35 + strands * 2.4) * nebula_density;
+        let warm = smoothstep(0.38, 0.83, clouds + x(uv) * 0.11);
+        let pigment = mix(srgb("#1955bf"), srgb("#ef9066"), warm);
+        let ion = strands * envelope * 0.095;
+        let opacity = 1.0 - exp(-density * 0.15);
+        let emission = transmission * opacity * (1.1 + strands * 2.8);
+        r += emission * red(pigment) + transmission * ion * 0.075;
+        g += emission * green(pigment) + transmission * ion * 0.25;
+        b += emission * blue(pigment) + transmission * ion * 0.68;
+        transmission *= 1.0 - opacity;
+        if transmission < 0.015 { break; }
+    }
+    return rgba(1.0 - exp(-r * exposure), 1.0 - exp(-g * exposure), 1.0 - exp(-b * exposure));
+}
+
+fn starfield(q: vec2, frequency: float, salt: int) -> color {
+    let cell = floor(q * frequency);
+    let chance = noise(cell + vec2(17.3, 9.1), seed: salt);
+    if chance < 0.81 { return rgba(0, 0, 0, 0); }
+    let center = vec2(noise(cell + vec2(3.7, 1.3), seed: salt), noise(cell + vec2(9.4, 8.2), seed: salt));
+    let local = q * frequency - cell - (center * 0.76 + vec2(0.12, 0.12));
+    let distance = length(local);
+    let brightness = pow((chance - 0.81) / 0.19, 3.0);
+    let core = exp(-distance * distance * 2800.0);
+    let halo = exp(-distance * 27.0) * 0.14;
+    let cross = exp(-abs(x(local)) * 450.0 - abs(y(local)) * 18.0)
+        + exp(-abs(y(local)) * 450.0 - abs(x(local)) * 18.0);
+    let hue = mix(srgb("#99caff"), srgb("#ffe0ae"), noise(cell + vec2(0.4, 5.2), seed: salt));
+    return opacity(hue, (core + halo + cross * brightness * 0.17) * (0.3 + brightness * 0.7));
+}
+
+fn rings(q: vec2, front: bool) -> color {
+    let local = rotate(q - vec2(-0.83, 0.29), -0.37);
+    if front && y(local) < 0.0 { return rgba(0, 0, 0, 0); }
+    if !front && y(local) >= 0.0 { return rgba(0, 0, 0, 0); }
+    let radius = length(vec2(x(local), y(local) * 3.8));
+    let shape = smoothstep(0.438, 0.448, radius) * (1.0 - smoothstep(0.704, 0.718, radius));
+    let bands = 0.38 + noise(vec2(radius * 260.0, 14.0), seed: 31) * 0.62;
+    let division = 1.0 - exp(-pow((radius - 0.592) * 210.0, 2.0));
+    let inner_gap = 1.0 - exp(-pow((radius - 0.493) * 340.0, 2.0)) * 0.65;
+    let shade = 0.34 + smoothstep(-0.55, 0.38, x(local)) * 0.66;
+    let material = mix(srgb("#497384"), srgb("#c4b5a0"), smoothstep(0.44, 0.72, radius));
+    return opacity(material, shape * bands * division * inner_gap * shade * 0.8);
+}
+
+fn planet(q: vec2, phase: float) -> color {
+    let local = q - vec2(-0.83, 0.29);
+    let radius = 0.323;
+    let distance = length(local);
+    if distance >= radius { return rgba(0, 0, 0, 0); }
+    let depth = sqrt(max(0.0, radius * radius - dot(local, local)));
+    let nx = x(local) / radius;
+    let ny = y(local) / radius;
+    let nz = depth / radius;
+    let uv = vec2(angular(vec2(nx, nz), vec2(0, 0)) * 5.0, ny * 2.0);
+    let turbulence = fbm(uv * 5.0 + vec2(sin(phase) * 0.035, 0.0), octaves: 6, seed: 71);
+    let bands = sin(ny * 49.0 + turbulence * 8.0) * 0.5 + 0.5;
+    let material = mix(srgb("#273750"), srgb("#87999c"), bands * 0.65 + turbulence * 0.35);
+    let light = max(0.0, nx * 0.68 - ny * 0.31 + nz * 0.48);
+    let rim = pow(1.0 - nz, 3.2) * pow(max(0.0, nx * 0.8 - ny * 0.4 + 0.2), 2.0);
+    let shadow = 0.008 + pow(light, 1.4) * 0.75;
+    return rgba(red(material) * shadow + rim * 0.10,
+                green(material) * shadow + rim * 0.30,
+                blue(material) * shadow + rim * 0.58);
+}
+
+fn beacon(q: vec2) -> color {
+    let local = q - vec2(0.88, -0.31);
+    let distance = length(local);
+    let core = exp(-distance * distance * 13000.0);
+    let halo = exp(-distance * 26.0) * 0.38;
+    let horizontal = exp(-abs(y(local)) * 650.0 - abs(x(local)) * 3.7) * 0.22;
+    let diagonal = rotate(local, 0.72);
+    let spikes = exp(-abs(x(diagonal)) * 400.0 - abs(y(diagonal)) * 15.0)
+        + exp(-abs(y(diagonal)) * 400.0 - abs(x(diagonal)) * 15.0);
+    return rgba(core * 1.3 + halo * 0.45 + horizontal * 0.7 + spikes * 0.12,
+                core * 1.1 + halo * 0.7 + horizontal * 0.8 + spikes * 0.10,
+                core * 0.8 + halo + horizontal + spikes * 0.08);
+}
+
+fn background(q: vec2, phase: float) -> color {
+    let clouds = nebula(q, phase);
+    let vignette = 1.0 - smoothstep(0.5, 2.1, length(q * vec2(0.65, 1.0))) * 0.45;
+    let light = beacon(q);
+    let sky = rgba(0.0015 + red(clouds) * vignette + red(light),
+                   0.0022 + green(clouds) * vignette + green(light),
+                   0.007 + blue(clouds) * vignette + blue(light));
+    let stars = over(starfield(q, 67.0, 133), starfield(q, 31.0, 157));
+    return over(stars, sky);
+}
+
+fn scene(q: vec2, phase: float) -> color {
+    let distant = background(q, phase);
+    let atmosphere = glow(circle(q - vec2(-0.83, 0.29), 0.325), 0.008, srgb("#4586b3"));
+    let back = over(rings(q, false), distant);
+    let world = over(planet(q, phase), over(opacity(atmosphere, 0.23), back));
+    return over(rings(q, true), world);
+}
+
+output main = scene(p, loop(t, 24.0) * tau);

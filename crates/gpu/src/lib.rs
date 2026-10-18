@@ -7,7 +7,8 @@
 //!
 //! # Data flow
 //!
-//! Each field becomes a WGSL function with explicit position and footprint inputs.
+//! Each scheduled expression becomes a WGSL function with explicit position and footprint
+//! inputs. Shared graph nodes become reusable temporaries; unreachable functions are omitted.
 //! Lazy sampling operations call source functions at transformed coordinates.
 //! Uniforms contain view mapping, region, sampling quality, time, and seed; a
 //! separate storage buffer contains typed parameter components. Workgroups of
@@ -222,7 +223,11 @@ impl GpuRenderer {
         {
             return Err("region exceeds GPU limits; render smaller tiles".into());
         }
-        let mapping = Mapping::new(program.viewbox, options.width, options.height);
+        let mapping = Mapping::new(
+            options.viewport.unwrap_or(program.viewbox),
+            options.width,
+            options.height,
+        );
         let settings = Settings {
             size: [options.width, options.height, region.x, region.y],
             geom: [
@@ -231,7 +236,7 @@ impl GpuRenderer {
                 mapping.units_per_pixel,
                 0.,
             ],
-            viewbox: program.viewbox,
+            viewbox: options.viewport.unwrap_or(program.viewbox),
             state: [
                 region.width,
                 region.height,

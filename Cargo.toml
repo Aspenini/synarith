@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/cpu", "crates/gpu", "crates/synarith", "crates/cli", "crates/viewer"]
+members = ["crates/stdlib", "crates/core", "crates/cpu", "crates/gpu", "crates/synarith", "crates/cli", "crates/viewer"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
@@ -8,6 +8,7 @@ license = "MIT OR Apache-2.0"
 rust-version = "1.89"
 
 [workspace.dependencies]
+synarith-stdlib = { path = "crates/stdlib" }
 synarith-core = { path = "crates/core" }
 synarith-cpu = { path = "crates/cpu" }
 synarith-gpu = { path = "crates/gpu" }

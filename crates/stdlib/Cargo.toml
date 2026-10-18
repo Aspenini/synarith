@@ -1,0 +1,10 @@
+[package]
+name = "synarith-stdlib"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Portable Synarith algorithms, written in the Synarith language"
+
+[lib]
+path = "src/lib.rs"

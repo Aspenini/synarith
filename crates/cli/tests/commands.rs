@@ -23,7 +23,153 @@ fn validate_and_inspect() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("duration"));
     let ops = cli(&["inspect", "--operations"]);
     assert!(ops.status.success());
-    assert!(String::from_utf8_lossy(&ops.stdout).contains("bezier"));
+    assert!(String::from_utf8_lossy(&ops.stdout).contains("hash"));
+    let operations: serde_json::Value = serde_json::from_slice(&ops.stdout).unwrap();
+    assert!(
+        operations
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|op| op["name"] != "mandelbrot")
+    );
+    let mandelbrot = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/mandelbrot.syar");
+    let inspected = cli(&["inspect", mandelbrot.to_str().unwrap()]);
+    assert!(inspected.status.success());
+    let inspected: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    assert_eq!(inspected["functions"][0]["name"], "mandelbrot");
+}
+
+#[test]
+fn standard_library_expansion_round_trips_through_cli() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-runs");
+    std::fs::create_dir_all(&root).unwrap();
+    let directory = tempfile::tempdir_in(root).unwrap();
+    let file = directory.path().join("portable.syar");
+    let source = "syar 1;\nuse /* keep */ std;\noutput main=blur(fill(circle(p-vec2(0.5,0.5),0.3),srgb(\"#54b8da80\")),0.02);\n";
+    std::fs::write(&file, source).unwrap();
+    let file = file.to_str().unwrap();
+    let before = directory.path().join("before.png");
+    let after = directory.path().join("after.png");
+    assert!(
+        cli(&[
+            "render",
+            file,
+            "-o",
+            before.to_str().unwrap(),
+            "--width",
+            "12",
+            "--height",
+            "8",
+            "--backend",
+            "cpu"
+        ])
+        .status
+        .success()
+    );
+    assert!(
+        !cli(&["fmt", file, "--expand-std", "--check"])
+            .status
+            .success()
+    );
+    assert!(
+        cli(&["fmt", file, "--expand-std", "--write"])
+            .status
+            .success()
+    );
+    let expanded = std::fs::read_to_string(file).unwrap();
+    assert!(expanded.contains("/* keep */"));
+    assert!(expanded.contains("fn circle("));
+    assert!(
+        synarith::parse(&expanded)
+            .unwrap()
+            .standard_library
+            .is_none()
+    );
+    assert!(
+        cli(&["fmt", file, "--expand-std", "--check"])
+            .status
+            .success()
+    );
+    assert!(cli(&["validate", file]).status.success());
+    assert!(
+        cli(&[
+            "render",
+            file,
+            "-o",
+            after.to_str().unwrap(),
+            "--width",
+            "12",
+            "--height",
+            "8",
+            "--backend",
+            "cpu"
+        ])
+        .status
+        .success()
+    );
+    assert_eq!(
+        std::fs::read(before).unwrap(),
+        std::fs::read(after).unwrap()
+    );
+}
+
+#[test]
+fn custom_algorithms_validate_inspect_render_and_animate_through_cli() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/test-runs");
+    std::fs::create_dir_all(&root).unwrap();
+    let directory = tempfile::tempdir_in(root).unwrap();
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/algorithms.syar");
+    let file = file.to_str().unwrap();
+    assert!(cli(&["validate", file]).status.success());
+    let inspected = cli(&["inspect", file]);
+    assert!(inspected.status.success());
+    let value: serde_json::Value = serde_json::from_slice(&inspected.stdout).unwrap();
+    assert_eq!(value["functions"][0]["name"], "orbit");
+    let still = directory.path().join("julia.png");
+    let result = cli(&[
+        "render",
+        file,
+        "-o",
+        still.to_str().unwrap(),
+        "--width",
+        "12",
+        "--height",
+        "8",
+        "--backend",
+        "cpu",
+        "--param",
+        "iterations=8",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(std::fs::read(still).unwrap().starts_with(b"\x89PNG"));
+    let frames = directory.path().join("frames");
+    let result = cli(&[
+        "animate",
+        file,
+        "-o",
+        frames.to_str().unwrap(),
+        "--width",
+        "12",
+        "--height",
+        "8",
+        "--backend",
+        "cpu",
+        "--frames",
+        "3",
+        "--fps",
+        "2",
+    ]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(frames.join("frame_000002.png").is_file());
+    assert!(!frames.join("frame_000003.png").exists());
 }
 #[test]
 fn still_format_selection_and_quality_are_forwarded_to_encoders() {

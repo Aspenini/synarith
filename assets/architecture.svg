@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="450" viewBox="0 0 1000 450" role="img" aria-labelledby="title description">
+  <title id="title">Synarith's three layers</title>
+  <desc id="description">User documents call source-defined standard-library algorithms. Both compile to the same typed graphs and structured loops, executed by CPU and GPU runtimes.</desc>
+  <rect width="1000" height="450" rx="16" fill="#0b0c10"/>
+  <g font-family="Segoe UI,Arial,sans-serif" text-anchor="middle">
+    <g fill="#14171e" stroke="#373d49">
+      <rect x="38" y="24" width="924" height="100" rx="12"/>
+      <rect x="38" y="175" width="924" height="100" rx="12"/>
+      <rect x="38" y="326" width="924" height="100" rx="12"/>
+    </g>
+    <g fill="#f0f2f6" font-size="25" font-weight="600">
+      <text x="500" y="65">User .syar documents</text>
+      <text x="500" y="216">Synarith standard library</text>
+      <text x="500" y="367">Synarith compiler and runtimes</text>
+    </g>
+    <g fill="#bdc5d2" font-size="19">
+      <text x="500" y="97">Fractals, textures, patterns, custom mathematical algorithms</text>
+      <text x="500" y="248">Noise, shapes, gradients, compositing, effects — written in .syar</text>
+      <text x="500" y="399">Math, vectors, control flow, hashing, sampling, CPU/GPU execution</text>
+    </g>
+    <g fill="none" stroke="#83bbed" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M500 137v23m-7-7 7 7 7-7"/>
+      <path d="M500 288v23m-7-7 7 7 7-7"/>
+    </g>
+  </g>
+</svg>

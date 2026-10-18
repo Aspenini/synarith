@@ -1,4 +1,5 @@
 syar 1;
+use std;
 let q = p - vec2(0.5, 0.5);
 let star_shape = star(rotate(q, t * 0.3), points: 7, outer: 0.35, inner: 0.19);
 let curve = bezier(p, a: vec2(0.05, 0.7), b: vec2(0.15, -0.2), c: vec2(0.8, 1.2), d: vec2(0.95, 0.2), width: 0.025);

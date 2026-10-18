@@ -136,6 +136,8 @@ pub struct Group {
     pub name: String,
     /// Ordered argument names and declared types.
     pub args: Vec<(String, Type)>,
+    /// Optional constant argument defaults, in argument order.
+    pub defaults: Vec<Option<Expr>>,
     /// Declared return type.
     pub ty: Type,
     /// Local named expressions.
@@ -147,6 +149,50 @@ pub struct Group {
     /// Byte range of the complete group declaration.
     pub span: Span,
 }
+/// A pure, nonrecursive mathematical function with sample-local state.
+#[derive(Clone, Debug)]
+pub struct FunctionDefinition {
+    /// Function name in the document namespace.
+    pub name: String,
+    /// Ordered typed arguments, immutable inside the function.
+    pub args: Vec<(String, Type)>,
+    /// Optional constant argument defaults, in argument order.
+    pub defaults: Vec<Option<Expr>>,
+    /// Declared result type.
+    pub ty: Type,
+    /// Structured function statements.
+    pub body: Vec<Statement>,
+    /// Source range of the complete definition.
+    pub span: Span,
+}
+/// A source-preserving statement within a mathematical function.
+#[derive(Clone, Debug)]
+pub struct Statement {
+    /// Statement syntax before validation.
+    pub kind: StatementKind,
+    /// Full source range, including its block or terminating semicolon.
+    pub span: Span,
+}
+/// Structured mathematical control flow; all mutation is local to one call.
+#[derive(Clone, Debug)]
+pub enum StatementKind {
+    /// A `let` or `var` binding: name, optional type, mutability, initializer.
+    Binding(String, Option<Type>, bool, Expr),
+    /// Assignment to an existing mutable variable.
+    Assign(String, Expr),
+    /// Boolean conditional with scoped then/else branches.
+    If(Expr, Vec<Statement>, Vec<Statement>),
+    /// Half-open integer range: index name, constant start/end, loop body.
+    For(String, Expr, Expr, Vec<Statement>),
+    /// Condition, constant maximum iteration count, loop body.
+    While(Expr, Expr, Vec<Statement>),
+    /// Exit the nearest loop.
+    Break,
+    /// Advance the nearest loop to its next iteration.
+    Continue,
+    /// Return a value from this function immediately.
+    Return(Expr),
+}
 /// Parsed source and declarations, preserving comments through source spans.
 ///
 /// Parsing checks syntax; [`crate::compile`] performs semantic validation.
@@ -155,6 +201,8 @@ pub struct Group {
 pub struct Document {
     /// Original UTF-8 source, including whitespace and comments.
     pub source: String,
+    /// Explicit opt-in to the bundled, source-defined standard library.
+    pub standard_library: Option<Span>,
     /// Exposed parameters in declaration order.
     pub parameters: Vec<Parameter>,
     /// Top-level named fields.
@@ -163,6 +211,8 @@ pub struct Document {
     pub outputs: Vec<Declaration>,
     /// Reusable typed groups.
     pub groups: Vec<Group>,
+    /// Typed mathematical functions with bounded iterative algorithms.
+    pub functions: Vec<FunctionDefinition>,
     /// Document-space `[x, y, width, height]`; defaults to the unit square.
     pub viewbox: [f32; 4],
     /// Exact 32-bit default seed.
@@ -280,11 +330,15 @@ fn lex(source: &str) -> Result<Vec<Token>, Diagnostic> {
             || (bytes[i] == b'.' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit))
         {
             let mut integer = true;
-            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.') {
-                if bytes[i] == b'.' {
-                    integer = false;
-                }
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
                 i += 1;
+            }
+            if bytes.get(i) == Some(&b'.') && bytes.get(i + 1) != Some(&b'.') {
+                integer = false;
+                i += 1;
+                while i < bytes.len() && bytes[i].is_ascii_digit() {
+                    i += 1;
+                }
             }
             if i < bytes.len() && (bytes[i] == b'e' || bytes[i] == b'E') {
                 integer = false;
@@ -338,7 +392,17 @@ fn lex(source: &str) -> Result<Vec<Token>, Diagnostic> {
             if i < bytes.len()
                 && matches!(
                     &source[start..i + 1],
-                    "->" | "==" | "!=" | "<=" | ">=" | "&&" | "||"
+                    "->" | "=="
+                        | "!="
+                        | "<="
+                        | ">="
+                        | "&&"
+                        | "||"
+                        | ".."
+                        | "+="
+                        | "-="
+                        | "*="
+                        | "/="
                 )
             {
                 i += 1;
@@ -368,6 +432,11 @@ fn lex(source: &str) -> Result<Vec<Token>, Diagnostic> {
                     | ">="
                     | "&&"
                     | "||"
+                    | ".."
+                    | "+="
+                    | "-="
+                    | "*="
+                    | "/="
             ) {
                 return Err(Diagnostic::new(
                     source,
@@ -391,6 +460,8 @@ fn lex(source: &str) -> Result<Vec<Token>, Diagnostic> {
     });
     Ok(tokens)
 }
+
+type Signature = (Vec<(String, Type)>, Vec<Option<Expr>>);
 
 struct Parser<'a> {
     source: &'a str,
@@ -442,6 +513,156 @@ impl<'a> Parser<'a> {
             "color" => Ok(Type::Color),
             _ => Err(self.error("expected float, int, bool, vec2, or color")),
         }
+    }
+    fn signature(&mut self) -> Result<Signature, Diagnostic> {
+        self.expect("(")?;
+        let mut args = vec![];
+        let mut defaults = vec![];
+        if !self.eat(")") {
+            loop {
+                let name = self.ident()?;
+                self.expect(":")?;
+                args.push((name, self.ty()?));
+                defaults.push(if self.eat("=") {
+                    Some(self.expr(0)?)
+                } else {
+                    None
+                });
+                if self.eat(")") {
+                    break;
+                }
+                self.expect(",")?;
+                if self.eat(")") {
+                    break;
+                }
+            }
+        }
+        Ok((args, defaults))
+    }
+    fn block(&mut self) -> Result<Vec<Statement>, Diagnostic> {
+        self.depth += 1;
+        if self.depth > 96 {
+            return Err(self.error("statement nesting exceeds 96"));
+        }
+        self.expect("{")?;
+        let mut body = Vec::new();
+        while !self.eat("}") {
+            body.push(self.statement()?);
+        }
+        self.depth -= 1;
+        Ok(body)
+    }
+    fn statement(&mut self) -> Result<Statement, Diagnostic> {
+        self.depth += 1;
+        if self.depth > 96 {
+            return Err(self.error("statement nesting exceeds 96"));
+        }
+        let result = self.statement_inner();
+        self.depth -= 1;
+        result
+    }
+    fn statement_inner(&mut self) -> Result<Statement, Diagnostic> {
+        let start = self.token().span.start;
+        let word = self.ident()?;
+        let kind = match word.as_str() {
+            "let" | "var" => {
+                let name = self.ident()?;
+                let ty = if self.eat(":") {
+                    Some(self.ty()?)
+                } else {
+                    None
+                };
+                self.expect("=")?;
+                let value = self.expr(0)?;
+                self.expect(";")?;
+                StatementKind::Binding(name, ty, word == "var", value)
+            }
+            "if" => {
+                let condition = self.expr(0)?;
+                let yes = self.block()?;
+                let no = if self.token().kind == TokenKind::Ident("else".into()) {
+                    self.take();
+                    if self.token().kind == TokenKind::Ident("if".into()) {
+                        vec![self.statement()?]
+                    } else {
+                        self.block()?
+                    }
+                } else {
+                    vec![]
+                };
+                StatementKind::If(condition, yes, no)
+            }
+            "for" => {
+                let name = self.ident()?;
+                if self.ident()? != "in" {
+                    return Err(self.error("expected 'in' after loop index"));
+                }
+                let begin = self.expr(0)?;
+                self.expect("..")?;
+                let end = self.expr(0)?;
+                StatementKind::For(name, begin, end, self.block()?)
+            }
+            "while" => {
+                let condition = self.expr(0)?;
+                if self.ident()? != "limit" {
+                    return Err(self.error("while requires 'limit CONSTANT'"));
+                }
+                let limit = self.expr(0)?;
+                StatementKind::While(condition, limit, self.block()?)
+            }
+            "break" => {
+                self.expect(";")?;
+                StatementKind::Break
+            }
+            "continue" => {
+                self.expect(";")?;
+                StatementKind::Continue
+            }
+            "return" => {
+                let value = self.expr(0)?;
+                self.expect(";")?;
+                StatementKind::Return(value)
+            }
+            _ => {
+                let op = self.take();
+                let TokenKind::Symbol(operator) = op.kind else {
+                    return Err(self.error("expected assignment"));
+                };
+                if !["=", "+=", "-=", "*=", "/="].contains(&operator.as_str()) {
+                    return Err(self.error("expected =, +=, -=, *=, or /="));
+                }
+                let mut value = self.expr(0)?;
+                if operator != "=" {
+                    let span = Span {
+                        start,
+                        end: value.span.end,
+                    };
+                    value = Expr {
+                        kind: ExprKind::Binary(
+                            operator[..1].into(),
+                            Box::new(Expr {
+                                kind: ExprKind::Name(word.clone()),
+                                span: Span {
+                                    start,
+                                    end: start + word.len(),
+                                },
+                            }),
+                            Box::new(value),
+                        ),
+                        span,
+                    };
+                }
+                self.expect(";")?;
+                StatementKind::Assign(word, value)
+            }
+        };
+        Ok(Statement {
+            kind,
+            span: Span {
+                start,
+                end: self.tokens[self.index - 1].span.end,
+            },
+        })
     }
     fn expr(&mut self, min: u8) -> Result<Expr, Diagnostic> {
         self.depth += 1;
@@ -617,10 +838,12 @@ pub fn parse(source: &str) -> Result<Document, Diagnostic> {
     p.expect(";")?;
     let mut doc = Document {
         source: source.into(),
+        standard_library: None,
         parameters: vec![],
         declarations: vec![],
         outputs: vec![],
         groups: vec![],
+        functions: vec![],
         viewbox: [0., 0., 1., 1.],
         seed: 0,
         editor: BTreeMap::new(),
@@ -631,6 +854,19 @@ pub fn parse(source: &str) -> Result<Document, Diagnostic> {
     while p.token().kind != TokenKind::End {
         let start = p.token().span.start;
         match p.ident()?.as_str() {
+            "use" => {
+                if p.ident()? != "std" {
+                    return Err(p.error("only the bundled 'std' library is supported"));
+                }
+                p.expect(";")?;
+                if doc.standard_library.is_some() {
+                    return Err(p.error("duplicate use std"));
+                }
+                doc.standard_library = Some(Span {
+                    start,
+                    end: p.tokens[p.index - 1].span.end,
+                });
+            }
             "param" => {
                 let name = p.ident()?;
                 p.expect(":")?;
@@ -650,6 +886,24 @@ pub fn parse(source: &str) -> Result<Document, Diagnostic> {
             }
             "let" => doc.declarations.push(p.declaration(start)?),
             "output" => doc.outputs.push(p.declaration(start)?),
+            "fn" => {
+                let name = p.ident()?;
+                let (args, defaults) = p.signature()?;
+                p.expect("->")?;
+                let ty = p.ty()?;
+                let body = p.block()?;
+                doc.functions.push(FunctionDefinition {
+                    name,
+                    args,
+                    defaults,
+                    ty,
+                    body,
+                    span: Span {
+                        start,
+                        end: p.tokens[p.index - 1].span.end,
+                    },
+                });
+            }
             "seed" => {
                 if has_seed {
                     return Err(p.error("duplicate seed"));
@@ -704,20 +958,7 @@ pub fn parse(source: &str) -> Result<Document, Diagnostic> {
             }
             "group" => {
                 let name = p.ident()?;
-                p.expect("(")?;
-                let mut args = vec![];
-                if !p.eat(")") {
-                    loop {
-                        let n = p.ident()?;
-                        p.expect(":")?;
-                        let ty = p.ty()?;
-                        args.push((n, ty));
-                        if p.eat(")") {
-                            break;
-                        }
-                        p.expect(",")?;
-                    }
-                }
+                let (args, defaults) = p.signature()?;
                 p.expect("->")?;
                 let ty = p.ty()?;
                 p.expect("{")?;
@@ -739,6 +980,7 @@ pub fn parse(source: &str) -> Result<Document, Diagnostic> {
                 doc.groups.push(Group {
                     name,
                     args,
+                    defaults,
                     ty,
                     body,
                     result,
@@ -750,7 +992,9 @@ pub fn parse(source: &str) -> Result<Document, Diagnostic> {
                 });
             }
             _ => {
-                return Err(p.error("expected param, let, group, output, seed, viewbox, or editor"));
+                return Err(
+                    p.error("expected param, let, fn, group, output, seed, viewbox, or editor")
+                );
             }
         }
     }
@@ -808,4 +1052,13 @@ pub fn preserve_expression_comments(
     } else {
         Ok(format!("{}\n{replacement}", comments.join("\n")))
     }
+}
+
+// Blank directive tokens, retaining comments, UTF-8 byte offsets, and line breaks.
+pub(crate) fn blank_directive(source: &str) -> Result<String, Diagnostic> {
+    let mut bytes = source.as_bytes().to_vec();
+    for token in lex(source)? {
+        bytes[token.span.start..token.span.end].fill(b' ');
+    }
+    Ok(String::from_utf8(bytes).expect("token blanking preserves UTF-8"))
 }

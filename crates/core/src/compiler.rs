@@ -1,6 +1,11 @@
 use crate::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
+mod functions;
+pub use functions::{
+    Function, Instruction, MAX_FUNCTION_INSTRUCTIONS, MAX_FUNCTION_LOCALS, MAX_FUNCTIONS,
+    MAX_LOOP_ITERATIONS,
+};
 
 /// Maximum number of nodes in a compiler-produced graph (4096).
 pub const MAX_NODES: usize = 4096;
@@ -81,6 +86,10 @@ pub enum NodeKind {
     Binary(String),
     /// A registry operation with arguments in signature order.
     Builtin(Op),
+    /// Read a typed slot from the current function's sample-local frame.
+    Local(usize),
+    /// Call a validated nonrecursive function; inputs supply its argument values.
+    Call(usize),
 }
 /// One node in an acyclic compiled graph; inputs index earlier program nodes.
 #[derive(Clone, Debug)]
@@ -93,7 +102,7 @@ pub struct Node {
     pub ty: Type,
     /// Source expression that produced this node.
     pub span: Span,
-    /// Whether the node depends on position, time, or a parameter.
+    /// Whether the node may depend on position, time, a parameter, or function-local state.
     pub varying: bool,
 }
 /// A named render-time parameter and its validated constant default.
@@ -126,6 +135,8 @@ pub struct Program {
     pub seed: u32,
     /// Compiler estimate of expanded evaluation work per sample.
     pub estimated_cost: u64,
+    /// Structured mathematical functions in dependency order (callees first).
+    pub functions: Vec<Function>,
 }
 impl Program {
     /// Return parameter defaults in declaration order.
@@ -186,6 +197,9 @@ struct Compiler<'a> {
     active: BTreeSet<String>,
     groups: Vec<String>,
     depth: usize,
+    functions: BTreeMap<String, usize>,
+    active_functions: BTreeSet<String>,
+    instruction_count: usize,
 }
 impl<'a> Compiler<'a> {
     fn err(&self, span: Span, message: impl Into<String>) -> Diagnostic {
@@ -203,7 +217,12 @@ impl<'a> Compiler<'a> {
         }
         let varying = matches!(
             kind,
-            NodeKind::Position | NodeKind::Time | NodeKind::Parameter(_)
+            NodeKind::Position
+                | NodeKind::Time
+                | NodeKind::Parameter(_)
+                | NodeKind::Local(_)
+                | NodeKind::Call(_)
+                | NodeKind::Builtin(Op::PixelSize)
         ) || inputs.iter().any(|id| self.program.nodes[*id].varying);
         let id = self.program.nodes.len();
         self.program.nodes.push(Node {
@@ -339,6 +358,9 @@ impl<'a> Compiler<'a> {
                 self.push(NodeKind::Binary(op.clone()), vec![a, b], ty, span)
             }
             ExprKind::Call(name, args) => {
+                if self.doc.functions.iter().any(|f| f.name == *name) {
+                    return self.function_call(name, args, locals, span);
+                }
                 if name == "srgb" {
                     if args.len() != 1 || args[0].name.is_some() {
                         return Err(self.err(span, "srgb expects one hexadecimal string"));
@@ -388,10 +410,25 @@ impl<'a> Compiler<'a> {
                         }
                         ids[index] = Some(id);
                     }
-                    let ids: Vec<usize> = ids
-                        .into_iter()
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| self.err(span, "missing group argument"))?;
+                    let mut resolved = vec![];
+                    for (index, input) in ids.into_iter().enumerate() {
+                        resolved.push(if let Some(id) = input {
+                            id
+                        } else if let Some(expr) = &group.defaults[index] {
+                            let value =
+                                constant_expression(expr).map_err(|m| self.err(expr.span, m))?;
+                            self.literal(
+                                Value {
+                                    ty: group.args[index].1,
+                                    ..value
+                                },
+                                span,
+                            )?
+                        } else {
+                            return Err(self.err(span, "missing group argument"));
+                        });
+                    }
+                    let ids = resolved;
                     let mut scope: BTreeMap<String, usize> =
                         group.args.iter().map(|(n, _)| n.clone()).zip(ids).collect();
                     self.groups.push(name.clone());
@@ -451,50 +488,19 @@ impl<'a> Compiler<'a> {
                         return Err(self.err(span, "inputs must have compatible types"));
                     }
                 }
-                for (index, input) in op.inputs.iter().enumerate() {
-                    if let Some(value) = self.constant_scalar(ids[index]) {
-                        let valid = value.is_finite()
-                            && match input.name {
-                                "octaves" => (1. ..=12.).contains(&value) && value.fract() == 0.,
-                                "iterations" => {
-                                    (1. ..=1024.).contains(&value) && value.fract() == 0.
-                                }
-                                "sides" => (3. ..=64.).contains(&value) && value.fract() == 0.,
-                                "points" => (2. ..=32.).contains(&value) && value.fract() == 0.,
-                                "radius" | "width" | "epsilon" | "duration" | "lacunarity"
-                                | "tolerance" => value > 0.,
-                                _ => true,
-                            };
-                        if !valid {
-                            return Err(self.err(
-                                span,
-                                format!("invalid constant {} for {}", input.name, name),
-                            ));
-                        }
-                    }
-                }
-                if op.op == Op::PeriodicNoise
-                    && let Some(value) = self.constant_vector(ids[1])
-                    && value.iter().any(|v| *v < 1. || v.fract() != 0.)
-                {
-                    return Err(self.err(span, "periodic_noise periods must be positive integers"));
-                }
-                for (index, input) in op.inputs.iter().enumerate() {
-                    if matches!(input.name, "size" | "radii" | "period")
-                        && let Some(v) = self.constant_vector(ids[index])
-                        && v.iter().any(|v| *v <= 0.)
-                    {
-                        return Err(self.err(
-                            span,
-                            format!("{} must have positive components", input.name),
-                        ));
-                    }
-                }
                 if matches!(op.op, Op::Sqrt | Op::Log)
                     && let Some(v) = self.constant_scalar(ids[0])
                     && (v < 0. || (op.op == Op::Log && v == 0.))
                 {
                     return Err(self.err(span, "invalid constant mathematical domain"));
+                }
+                if op.op == Op::Footprint
+                    && !matches!(
+                        self.program.nodes[ids[0]].ty,
+                        Type::Float | Type::Int | Type::Vec2
+                    )
+                {
+                    return Err(self.err(span, "footprint requires a scalar or vec2 field"));
                 }
                 let mut ty = match op.result {
                     ReturnType::Exact(ty) => ty,
@@ -581,17 +587,6 @@ impl<'a> Compiler<'a> {
             _ => None,
         }
     }
-    fn constant_vector(&self, id: usize) -> Option<[f32; 2]> {
-        let node = &self.program.nodes[id];
-        match &node.kind {
-            NodeKind::Constant(v) if v.ty == Type::Vec2 => Some([v.data[0], v.data[1]]),
-            NodeKind::Builtin(Op::Vec2) => Some([
-                self.constant_scalar(node.inputs[0])?,
-                self.constant_scalar(node.inputs[1])?,
-            ]),
-            _ => None,
-        }
-    }
     fn arguments(
         &mut self,
         args: &[Argument],
@@ -667,6 +662,35 @@ impl<'a> Compiler<'a> {
 pub fn compatible(a: Type, b: Type) -> bool {
     a == b || matches!((a, b), (Type::Int, Type::Float))
 }
+fn reserved(name: &str) -> bool {
+    matches!(
+        name,
+        "p" | "t"
+            | "pi"
+            | "tau"
+            | "true"
+            | "false"
+            | "fn"
+            | "var"
+            | "let"
+            | "if"
+            | "else"
+            | "for"
+            | "in"
+            | "while"
+            | "limit"
+            | "return"
+            | "break"
+            | "continue"
+            | "param"
+            | "group"
+            | "output"
+            | "use"
+            | "std"
+            | "viewbox"
+            | "editor"
+    )
+}
 fn expression_names(expr: &Expr, names: &mut Vec<String>) {
     match &expr.kind {
         ExprKind::Name(n) => names.push(n.clone()),
@@ -731,9 +755,10 @@ pub fn parse_color(text: &str) -> Result<Value, String> {
     ))
 }
 
-/// Resolve and type-check a parsed document into a reusable acyclic graph.
+/// Resolve and type-check a document into reusable expression graphs and structured functions.
 ///
-/// Validates every group, including unused groups, and expands calls.
+/// Validates every group and function, including unused definitions. Groups are
+/// expanded; function bodies and loops are retained as structured instructions.
 /// Parameter values remain dynamic.
 ///
 /// # Errors
@@ -741,14 +766,36 @@ pub fn parse_color(text: &str) -> Result<Value, String> {
 /// operations, incompatible types, cycles/recursion, invalid known constant
 /// arguments, missing color outputs, or graph depth/node/evaluation limits.
 pub fn compile(doc: &Document) -> Result<Program, Diagnostic> {
+    if let Some(import) = doc.standard_library {
+        let expanded = crate::standard::expand(doc)?;
+        return compile(&expanded).map_err(|error| {
+            if error.span.start >= doc.source.len() {
+                Diagnostic::new(
+                    &doc.source,
+                    import,
+                    format!("standard library: {}", error.message),
+                )
+            } else {
+                error
+            }
+        });
+    }
+
+    if doc.functions.len() > MAX_FUNCTIONS {
+        return Err(Diagnostic::new(
+            &doc.source,
+            doc.functions[MAX_FUNCTIONS].span,
+            "document exceeds 128 functions",
+        ));
+    }
     let mut names = BTreeSet::new();
-    let reserved = |n: &str| matches!(n, "p" | "t" | "pi" | "tau" | "true" | "false");
     for (name, span) in doc
         .parameters
         .iter()
         .map(|d| (&d.name, d.span))
         .chain(doc.declarations.iter().map(|d| (&d.name, d.span)))
         .chain(doc.groups.iter().map(|g| (&g.name, g.span)))
+        .chain(doc.functions.iter().map(|f| (&f.name, f.span)))
     {
         if reserved(name) || !names.insert(name) {
             return Err(Diagnostic::new(
@@ -782,6 +829,35 @@ pub fn compile(doc: &Document) -> Result<Program, Diagnostic> {
             }
         }
     }
+    for function in &doc.functions {
+        if operation(&function.name).is_some() || function.name == "srgb" {
+            return Err(Diagnostic::new(
+                &doc.source,
+                function.span,
+                "function name conflicts with a built-in operation",
+            ));
+        }
+    }
+    for (args, defaults) in doc
+        .functions
+        .iter()
+        .map(|f| (&f.args, &f.defaults))
+        .chain(doc.groups.iter().map(|g| (&g.args, &g.defaults)))
+    {
+        for ((_, ty), default) in args.iter().zip(defaults) {
+            if let Some(expr) = default {
+                let value = constant_expression(expr)
+                    .map_err(|m| Diagnostic::new(&doc.source, expr.span, m))?;
+                if !compatible(value.ty, *ty) {
+                    return Err(Diagnostic::new(
+                        &doc.source,
+                        expr.span,
+                        "incorrect default argument type",
+                    ));
+                }
+            }
+        }
+    }
     let mut c = Compiler {
         doc,
         program: Program {
@@ -792,11 +868,15 @@ pub fn compile(doc: &Document) -> Result<Program, Diagnostic> {
             viewbox: doc.viewbox,
             seed: doc.seed,
             estimated_cost: 0,
+            functions: vec![],
         },
         resolved: BTreeMap::new(),
         active: BTreeSet::new(),
         groups: vec![],
         depth: 0,
+        functions: BTreeMap::new(),
+        active_functions: BTreeSet::new(),
+        instruction_count: 0,
     };
     for param in &doc.parameters {
         let value =
@@ -854,10 +934,14 @@ pub fn compile(doc: &Document) -> Result<Program, Diagnostic> {
         if c.program.nodes[id].ty != Type::Color {
             return Err(c.err(
                 output.expr.span,
-                "outputs must be colors; use rgba(), srgb(), fill(), or a color ramp",
+                "outputs must be colors; use rgba(), srgb(), or a color-valued function",
             ));
         }
         c.program.outputs.insert(output.name.clone(), id);
+    }
+    // Validate even unused function definitions, including control flow and bounds.
+    for function in &doc.functions {
+        c.compile_function(&function.name, function.span)?;
     }
     if c.program.outputs.is_empty() {
         return Err(c.err(Span::default(), "document requires at least one output"));
@@ -870,20 +954,28 @@ pub fn compile(doc: &Document) -> Result<Program, Diagnostic> {
             .inputs
             .iter()
             .map(|id| costs[*id])
-            .sum::<u64>()
+            .fold(0u64, u64::saturating_add)
             .saturating_add(1);
         let multiplier = match node.kind {
-            NodeKind::Builtin(Op::Mandelbrot) => 1024,
-            NodeKind::Builtin(Op::Blur) => 9,
-            NodeKind::Builtin(Op::Normal) => 5,
-            NodeKind::Builtin(Op::Noise | Op::GradientNoise) => 4,
-            NodeKind::Builtin(Op::Fill | Op::Stroke | Op::Outline | Op::Warp | Op::Transform) => 5,
-            NodeKind::Builtin(Op::Fbm | Op::Turbulence | Op::Ridged) => 12,
-            NodeKind::Builtin(Op::Bezier | Op::Polygon | Op::Star) => 64,
-            NodeKind::Builtin(Op::Path) => 256,
+            NodeKind::Builtin(Op::Footprint) => 4,
             _ => 1,
         };
-        let cost = base.saturating_mul(multiplier);
+        let function_metrics = if let NodeKind::Call(index) = node.kind {
+            functions::metrics(&c.program.functions[index].body, &costs, &depths)
+        } else {
+            (0, 0)
+        };
+        let sampling_cost = if matches!(node.kind, NodeKind::Builtin(Op::SampleAt)) {
+            // Source is evaluated once. Coordinate footprint adds three coordinate
+            // evaluations, not three evaluations of the source field.
+            costs[node.inputs[1]].saturating_mul(3)
+        } else {
+            0
+        };
+        let cost = base
+            .saturating_mul(multiplier)
+            .saturating_add(function_metrics.0)
+            .saturating_add(sampling_cost);
         costs.push(cost);
         let depth = node
             .inputs
@@ -891,10 +983,20 @@ pub fn compile(doc: &Document) -> Result<Program, Diagnostic> {
             .map(|id| depths[*id])
             .max()
             .unwrap_or(0usize)
+            .max(function_metrics.1)
             + 1;
         depths.push(depth);
         if cost > 2_000_000 || depth > MAX_GRAPH_DEPTH {
             return Err(c.err(node.span, "graph exceeds bounded evaluation cost or depth"));
+        }
+    }
+    for function in &c.program.functions {
+        let (cost, depth) = functions::metrics(&function.body, &costs, &depths);
+        if cost > 2_000_000 || depth > MAX_GRAPH_DEPTH {
+            return Err(c.err(
+                function.span,
+                "function exceeds bounded evaluation cost or depth",
+            ));
         }
     }
     c.program.estimated_cost = c

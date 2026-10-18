@@ -1,0 +1,66 @@
+syar 1;
+use std;
+// Barnsley fern: a user-written chaos game, with the classic four affine maps.
+// Coefficients/probabilities: https://paulbourke.net/fractals/ifs/index.html
+// Each sample measures distance to the SAME deterministic mathematical orbit.
+// No point cloud, bitmap, or mutable frame state is stored in the document.
+// This finite-orbit approximation trades leaf detail against evaluation work.
+// Render: syar render examples/barnsley-fern.syar -o fern.png --width 1000 --height 1750 --backend gpu
+viewbox(-3.2, -0.6, 6.4, 11.2);
+
+param points: int = 8192;
+param orbit_seed: int = 127;
+param thickness: float = 0.025;
+param leaf: color = srgb("#17613e");
+param tip: color = srgb("#8aa44d");
+param paper: color = srgb("#f3f0df");
+
+fn fern_step(q: vec2, choice: float) -> vec2 {
+    if choice < 0.01 {
+        return vec2(0.0, 0.16 * y(q));
+    } else if choice < 0.86 {
+        return vec2(0.85 * x(q) + 0.04 * y(q), -0.04 * x(q) + 0.85 * y(q) + 1.6);
+    } else if choice < 0.93 {
+        return vec2(0.20 * x(q) - 0.26 * y(q), 0.23 * x(q) + 0.22 * y(q) + 1.6);
+    } else {
+        return vec2(-0.15 * x(q) + 0.28 * y(q), 0.26 * x(q) + 0.24 * y(q) + 0.44);
+    }
+}
+
+fn orbit_distance(q: vec2) -> float {
+    // 17 is a primitive root modulo 65521. Products stay below 2^24,
+    // so this integer generator is exact in the shared f32 representation.
+    var state = int(abs(float(orbit_seed)) % 65520.0) + 1;
+    var z = vec2(0, 0);
+    var nearest = 200.0;
+    for batch in 0..3 {
+        for i in 0..4096 {
+            if batch * 4096 + i >= points { return sqrt(nearest); }
+            state = (state * 17) % 65521;
+            z = fern_step(z, float(state) / 65521.0);
+            // Discard the initial transient before measuring the attractor.
+            if batch == 0 && i < 20 { continue; }
+            let delta = q - z;
+            nearest = min(nearest, dot(delta, delta));
+        }
+    }
+    return sqrt(nearest);
+}
+
+fn botanical(q: vec2) -> color {
+    let position = vec2(x(q), 10.0 - y(q));
+    if x(position) < -2.25 || x(position) > 2.75 || y(position) < -0.1 || y(position) > 10.1 {
+        return rgba(0, 0, 0, 0);
+    }
+    let distance = orbit_distance(position);
+    let radius = max(abs(thickness), 0.001);
+    let coverage = 1.0 - smoothstep(radius * 0.35, radius, distance);
+    let pigment = mix(leaf, tip, clamp(y(position) / 10.0, 0.0, 1.0) * 0.65);
+    return opacity(pigment, coverage);
+}
+
+// points is capped by the three 4096-step batches; use 21..12288.
+// thickness is in fern/document units, independent of output resolution.
+// Select --output-name fern for a transparent botanical cutout.
+output main = over(botanical(p), paper);
+output fern = botanical(p);

@@ -1,0 +1,261 @@
+syar 1;
+// Synarith's portable library. These are ordinary editable algorithms, not opcodes.
+// use std; selects only the definitions needed by a document.
+
+fn std_corner(cell: vec2, offset: vec2, fraction: vec2, seed: int, stream: int, period: vec2, gradient: bool) -> float {
+    var at = cell + offset;
+    if x(period) > 0 && y(period) > 0 { at = at % period; }
+    let h = hash(at, seed, stream);
+    if gradient {
+        let angle = h * tau;
+        return dot(vec2(cos(angle), sin(angle)), fraction - offset);
+    }
+    return h;
+}
+fn std_noise(q: vec2, seed: int, stream: int, period: vec2, gradient: bool) -> float {
+    let cell = floor(q);
+    let f = q - cell;
+    let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+    let a = std_corner(cell, vec2(0,0), f, seed, stream, period, gradient) * (1.0-x(u))
+        + std_corner(cell, vec2(1,0), f, seed, stream, period, gradient) * x(u);
+    let b = std_corner(cell, vec2(0,1), f, seed, stream, period, gradient) * (1.0-x(u))
+        + std_corner(cell, vec2(1,1), f, seed, stream, period, gradient) * x(u);
+    let value = a * (1.0-y(u)) + b * y(u);
+    if gradient { return value * 0.7 + 0.5; }
+    return value;
+}
+group noise(q: vec2, seed: int = 0) -> float {
+    let band = 1.0 - smoothstep(0.25, 0.75, footprint(q));
+    return std_noise(q, seed, 0, vec2(0,0), false) * band + 0.5 * (1.0-band);
+}
+group gradient_noise(q: vec2, seed: int = 0) -> float {
+    let band = 1.0 - smoothstep(0.25, 0.75, footprint(q));
+    return std_noise(q, seed, 0, vec2(0,0), true) * band + 0.5 * (1.0-band);
+}
+fn periodic_noise(q: vec2, period: vec2 = vec2(4,4), seed: int = 0) -> float {
+    return std_noise(q, seed, 0, max(floor(period + 0.5), vec2(1,1)), false);
+}
+fn cellular(q: vec2, seed: int = 0) -> float {
+    let cell = floor(q);
+    let f = q - cell;
+    var distance = 4.0;
+    for row in 0..3 {
+        for column in 0..3 {
+            let offset = vec2(float(column)-1.0, float(row)-1.0);
+            let at = cell + offset;
+            let delta = offset + vec2(hash(at, seed), hash(at, seed, 0, 1)) - f;
+            distance = min(distance, dot(delta,delta));
+        }
+    }
+    return min(sqrt(distance), 1.0);
+}
+fn std_fractal(q: vec2, octaves: int, lacunarity: float, gain: float, seed: int, width: float, mode: int) -> float {
+    var frequency = 1.0;
+    var amplitude = 1.0;
+    var total = 0.0;
+    var weight = 0.0;
+    for octave in 0..12 {
+        if octave >= int(clamp(float(octaves),1.0,12.0)) { break; }
+        let band = 1.0 - smoothstep(0.25,0.75,width * frequency);
+        let raw = std_noise(q * frequency, seed, octave, vec2(0,0), false);
+        var value = raw;
+        if mode == 1 { value = abs(raw * 2.0 - 1.0); }
+        if mode == 2 { value = 1.0 - abs(raw * 2.0 - 1.0); }
+        total += (value * band + 0.5 * (1.0-band)) * amplitude;
+        weight += amplitude;
+        frequency *= clamp(abs(lacunarity),0.01,16.0);
+        amplitude *= clamp(gain,0.0,1.0);
+    }
+    return total / weight;
+}
+group fbm(q: vec2, octaves: int = 6, lacunarity: float = 2.0, gain: float = 0.5, seed: int = 0) -> float {
+    return std_fractal(q,octaves,lacunarity,gain,seed,footprint(q),0);
+}
+group turbulence(q: vec2, octaves: int = 6, lacunarity: float = 2.0, gain: float = 0.5, seed: int = 0) -> float {
+    return std_fractal(q,octaves,lacunarity,gain,seed,footprint(q),1);
+}
+group ridged(q: vec2, octaves: int = 6, lacunarity: float = 2.0, gain: float = 0.5, seed: int = 0) -> float {
+    return std_fractal(q,octaves,lacunarity,gain,seed,footprint(q),2);
+}
+
+fn linear(q: vec2, start: vec2 = vec2(0,0), end: vec2 = vec2(1,0)) -> float {
+    let delta = end-start;
+    return dot(q-start,delta)/dot(delta,delta);
+}
+fn radial(q: vec2, center: vec2 = vec2(0.5,0.5), radius: float = 0.5) -> float {
+    return length(q-center)/max(abs(radius),0.00000001);
+}
+fn angular(q: vec2, center: vec2 = vec2(0.5,0.5)) -> float {
+    return atan2(y(q)-y(center),x(q)-x(center))/tau+0.5;
+}
+fn ramp(value: float, a: color = rgba(0,0,0), b: color = rgba(0.25,0.25,0.25), c: color = rgba(0.75,0.75,0.75), d: color = rgba(1,1,1), p1: float = 0.33333334, p2: float = 0.6666667) -> color {
+    let first = clamp(p1,0.0001,0.9998);
+    let second = clamp(p2,first+0.0001,0.9999);
+    let v = clamp(value,0.0,1.0);
+    if v < first { return mix(a,b,v/first); }
+    if v < second { return mix(b,c,(v-first)/(second-first)); }
+    return mix(c,d,(v-second)/(1.0-second));
+}
+fn circle(q: vec2, radius: float = 0.3) -> float { return length(q)-abs(radius); }
+fn box(q: vec2, size: vec2 = vec2(0.3,0.2)) -> float {
+    let delta = abs(q)-abs(size);
+    return length(max(delta,vec2(0,0)))+min(max(x(delta),y(delta)),0.0);
+}
+fn rounded_box(q: vec2, size: vec2 = vec2(0.3,0.2), radius: float = 0.05) -> float {
+    let r = min(abs(radius),min(abs(x(size)),abs(y(size))));
+    let delta = abs(q)-abs(size)+r;
+    return length(max(delta,vec2(0,0)))+min(max(x(delta),y(delta)),0.0)-r;
+}
+fn ellipse(q: vec2, radii: vec2 = vec2(0.3,0.2)) -> float {
+    let r = max(abs(radii),vec2(0.00000001,0.00000001));
+    return (length(q/r)-1.0)*min(x(r),y(r));
+}
+fn std_segment(q: vec2, a: vec2, b: vec2) -> float {
+    let v = b-a;
+    let w = q-a;
+    return length(w-v*clamp(dot(w,v)/dot(v,v),0.0,1.0));
+}
+fn std_crossing(q: vec2, a: vec2, b: vec2) -> bool {
+    return ((y(a)>y(q)) != (y(b)>y(q))) && x(q) < (x(b)-x(a))*(y(q)-y(a))/(y(b)-y(a))+x(a);
+}
+fn std_vertex(index: int, count: int, outer: float, inner: float) -> vec2 {
+    let angle = float(index)/float(count)*tau-tau*0.25;
+    let radius = select(index%2==1,inner,outer);
+    return radius*vec2(cos(angle),sin(angle));
+}
+fn std_polygon(q: vec2, count: int, outer: float, inner: float) -> float {
+    var distance = 3.402823e38;
+    var inside = false;
+    var a = std_vertex(count-1,count,outer,inner);
+    for index in 0..64 {
+        if index >= count { break; }
+        let b = std_vertex(index,count,outer,inner);
+        distance = min(distance,std_segment(q,a,b));
+        if std_crossing(q,a,b) { inside = !inside; }
+        a = b;
+    }
+    return select(inside,-distance,distance);
+}
+fn polygon(q: vec2, sides: int = 6, radius: float = 0.3) -> float {
+    return std_polygon(q,int(clamp(float(sides),3.0,64.0)),abs(radius),abs(radius));
+}
+fn star(q: vec2, points: int = 5, outer: float = 0.3, inner: float = 0.15) -> float {
+    return std_polygon(q,int(clamp(float(points),2.0,32.0))*2,abs(outer),abs(inner));
+}
+fn std_cubic(a: vec2, b: vec2, c: vec2, d: vec2, u: float) -> vec2 {
+    let v = 1.0-u;
+    return v*v*v*a+3.0*v*v*u*b+3.0*v*u*u*c+u*u*u*d;
+}
+fn std_path(q: vec2, a: vec2, b: vec2, c: vec2, d: vec2, count: int, closed: bool) -> float {
+    var previous = a;
+    var distance = 3.402823e38;
+    var inside = false;
+    for index in 1..257 {
+        if index > count { break; }
+        let next = std_cubic(a,b,c,d,float(index)/float(count));
+        distance = min(distance,std_segment(q,previous,next));
+        if std_crossing(q,previous,next) { inside = !inside; }
+        previous = next;
+    }
+    if closed {
+        distance = min(distance,std_segment(q,previous,a));
+        if std_crossing(q,previous,a) { inside = !inside; }
+    }
+    return select(closed && inside,-distance,distance);
+}
+fn bezier(q: vec2, a: vec2 = vec2(0,0), b: vec2 = vec2(0.2,1), c: vec2 = vec2(0.8,0), d: vec2 = vec2(1,1), width: float = 0.01) -> float {
+    return std_path(q,a,b,c,d,64,false)-abs(width)*0.5;
+}
+fn path(q: vec2, a: vec2 = vec2(0.1,0.7), b: vec2 = vec2(0.1,0.1), c: vec2 = vec2(0.9,0.1), d: vec2 = vec2(0.9,0.7), closed: bool = true, tolerance: float = 0.0001) -> float {
+    let curvature = 6.0*max(length(a-2.0*b+c),length(b-2.0*c+d));
+    let count = int(clamp(ceil(sqrt(curvature/(8.0*max(abs(tolerance),0.00000001)))),8.0,256.0));
+    return std_path(q,a,b,c,d,count,closed);
+}
+fn union(a: float, b: float) -> float { return min(a,b); }
+fn intersect(a: float, b: float) -> float { return max(a,b); }
+fn subtract(a: float, b: float) -> float { return max(a,-b); }
+fn smooth_union(a: float, b: float, radius: float = 0.1) -> float {
+    let r = max(abs(radius),0.00000001);
+    let h = clamp(0.5+0.5*(b-a)/r,0.0,1.0);
+    return mix(b,a,h)-r*h*(1.0-h);
+}
+fn std_fill(distance: float, width: float, color: color) -> color {
+    return opacity(color,1.0-smoothstep(-width*0.5,width*0.5,distance));
+}
+group fill(distance: float, color: color = rgba(1,1,1)) -> color {
+    return std_fill(distance,max(footprint(distance),max(pixel_size()*0.05,0.0000001)),color);
+}
+group stroke(distance: float, width: float = 0.02, color: color = rgba(1,1,1)) -> color {
+    return fill(abs(distance)-abs(width)*0.5,color);
+}
+group outline(distance: float, width: float = 0.02, color: color = rgba(1,1,1)) -> color {
+    return fill(abs(distance-abs(width)*0.5)-abs(width)*0.5,color);
+}
+fn glow(distance: float, radius: float = 0.1, color: color = rgba(1,1,1)) -> color {
+    return opacity(color,exp(-max(distance,0.0)/max(abs(radius),0.00000001)));
+}
+fn translate(q: vec2, offset: vec2 = vec2(0.1,0)) -> vec2 { return q-offset; }
+fn rotate(q: vec2, angle: float = 0.0) -> vec2 {
+    return vec2(cos(angle)*x(q)-sin(angle)*y(q),sin(angle)*x(q)+cos(angle)*y(q));
+}
+fn scale(q: vec2, factor: vec2 = vec2(2,2)) -> vec2 { return q*factor; }
+fn repeat(q: vec2, period: vec2 = vec2(0.25,0.25)) -> vec2 {
+    let span = max(abs(period),vec2(0.00000001,0.00000001));
+    return q-span*floor((q+span*0.5)/span);
+}
+fn mirror(q: vec2) -> vec2 { return abs(q); }
+fn polar(q: vec2) -> vec2 { return vec2(length(q),atan2(y(q),x(q))); }
+
+fn invert(color: color) -> color { return rgba(1.0-red(color),1.0-green(color),1.0-blue(color),alpha(color)); }
+fn grayscale(color: color) -> color {
+    let l = red(color)*0.2126+green(color)*0.7152+blue(color)*0.0722;
+    return rgba(l,l,l,alpha(color));
+}
+fn contrast(color: color, amount: float = 1.0) -> color {
+    return rgba((red(color)-0.5)*amount+0.5,(green(color)-0.5)*amount+0.5,(blue(color)-0.5)*amount+0.5,alpha(color));
+}
+fn saturate(color: color, amount: float = 1.0) -> color { return mix(grayscale(color),color,amount); }
+fn std_blend_channel(a: float, b: float, mode: int) -> float {
+    if mode == 1 { return a*b; }
+    if mode == 2 { return a+b-a*b; }
+    if b <= 0.5 { return 2.0*a*b; }
+    return 1.0-2.0*(1.0-a)*(1.0-b);
+}
+fn std_blend(foreground: color, background: color, mode: int) -> color {
+    let aa = alpha(foreground);
+    let ba = alpha(background);
+    let a = foreground*(1.0-ba);
+    let b = background*(1.0-aa);
+    let v = rgba(std_blend_channel(red(foreground),red(background),mode),std_blend_channel(green(foreground),green(background),mode),std_blend_channel(blue(foreground),blue(background),mode));
+    let coverage = aa+ba*(1.0-aa);
+    let combined = a+b+v*(aa*ba);
+    return rgba(red(combined)*alpha(combined)/coverage,green(combined)*alpha(combined)/coverage,blue(combined)*alpha(combined)/coverage,coverage);
+}
+fn multiply(foreground: color, background: color) -> color { return std_blend(foreground,background,1); }
+fn screen(foreground: color, background: color) -> color { return std_blend(foreground,background,2); }
+fn overlay(foreground: color, background: color) -> color { return std_blend(foreground,background,3); }
+fn loop(time: float, duration: float = 1.0) -> float { return fract(time/max(abs(duration),0.00000001)); }
+fn pulse(phase: float) -> float { return 0.5-0.5*cos(phase*tau); }
+
+// Groups preserve source expressions for resampling; function arguments are values.
+group blur(source: color, radius: float = 0.01) -> color {
+    let r = max(radius,0.0);
+    return (sample_at(source,p+vec2(-r,-r))+sample_at(source,p+vec2(r,-r))
+        +sample_at(source,p+vec2(-r,r))+sample_at(source,p+vec2(r,r))
+        +2.0*(sample_at(source,p+vec2(0,-r))+sample_at(source,p+vec2(0,r))
+        +sample_at(source,p+vec2(-r,0))+sample_at(source,p+vec2(r,0)))+4.0*source)/16.0;
+}
+fn std_normal(dx: float, dy: float, strength: float) -> color {
+    let vx = dx*strength;
+    let vy = dy*strength;
+    let magnitude = sqrt(vx*vx+vy*vy+1.0);
+    return rgba(-vx/magnitude*0.5+0.5,-vy/magnitude*0.5+0.5,1.0/magnitude*0.5+0.5);
+}
+group normal(height: float, strength: float = 1.0, epsilon: float = 0.001) -> color {
+    let e = max(abs(epsilon),0.000001);
+    let dx = (sample_at(height,p+vec2(e,0))-sample_at(height,p-vec2(e,0)))/(2.0*e);
+    let dy = (sample_at(height,p+vec2(0,e))-sample_at(height,p-vec2(0,e)))/(2.0*e);
+    return std_normal(dx,dy,strength);
+}
+
+group warp(source: float, displacement: vec2) -> float { return sample_at(source,p+displacement); }

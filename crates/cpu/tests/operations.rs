@@ -61,12 +61,24 @@ fn every_registered_operation_executes_on_cpu() {
 
 #[test]
 fn bundled_documents_render_without_graphics_dependencies() {
+    // A shorter orbit keeps CPU coverage quick; the same function and all four maps run.
+    let fern = include_str!("../../../examples/barnsley-fern.syar")
+        .replace("param points: int = 8192;", "param points: int = 256;");
+    let koch = include_str!("../../../examples/koch-snowflake.syar")
+        .replace("param depth: int = 4;", "param depth: int = 2;");
+    let dragon = include_str!("../../../examples/dragon-curve.syar")
+        .replace("param depth: int = 10;", "param depth: int = 6;");
     for source in [
+        koch.as_str(),
+        dragon.as_str(),
         include_str!("../../../examples/clouds.syar"),
         include_str!("../../../examples/orbit.syar"),
         include_str!("../../../examples/tiles.syar"),
         include_str!("../../../examples/paths.syar"),
         include_str!("../../../examples/mandelbrot.syar"),
+        include_str!("../../../examples/algorithms.syar"),
+        include_str!("../../../examples/deep-space.syar"),
+        fern.as_str(),
     ] {
         let program = compile(&parse(source).unwrap()).unwrap();
         let options = RenderOptions {

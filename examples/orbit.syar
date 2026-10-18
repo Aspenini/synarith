@@ -1,4 +1,5 @@
 syar 1;
+use std;
 // An exact four-second procedural loop, with independent frame evaluation.
 param duration: float = 4.0;
 let phase = loop(t, duration);

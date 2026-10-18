@@ -8,7 +8,7 @@ fn representative_document_and_reserved_function_names() {
 }
 #[test]
 fn groups_named_arguments_and_forward_references() {
-    let source = "syar 1; group paint(q:vec2, ink:color)->color {let d=circle(q);return fill(d,ink);} let image=paint(ink:srgb(\"#123456\"),q:pos);let pos=p-vec2(0.5,0.5);output main=image;";
+    let source = "syar 1;use std; group paint(q:vec2, ink:color)->color {let d=circle(q);return fill(d,ink);} let image=paint(ink:srgb(\"#123456\"),q:pos);let pos=p-vec2(0.5,0.5);output main=image;";
     assert!(compile(&parse(source).unwrap()).is_ok());
 }
 #[test]
@@ -18,53 +18,54 @@ fn diagnoses_invalid_documents() {
             "syar 2;output main=rgba(0,0,0);",
             "unsupported format version",
         ),
-        ("syar 1;output main=missing;", "unknown name"),
-        ("syar 1;output main=mystery(p);", "unknown operation"),
+        ("syar 1;use std;output main=missing;", "unknown name"),
         (
-            "syar 1;let a=b;let b=a;output main=rgba(0,0,0);",
+            "syar 1;use std;output main=mystery(p);",
+            "unknown operation",
+        ),
+        (
+            "syar 1;use std;let a=b;let b=a;output main=rgba(0,0,0);",
             "cyclic reference",
         ),
         (
-            "syar 1;group recursive(q:vec2)->color{return recursive(q);}output main=rgba(0,0,0);",
+            "syar 1;use std;group recursive(q:vec2)->color{return recursive(q);}output main=rgba(0,0,0);",
             "recursive group",
         ),
         (
-            "syar 1;output main=fill(circle(p,radius:-1));",
-            "invalid constant radius",
+            "syar 1;output main=rgba(sqrt(-1),0,0);",
+            "invalid constant mathematical domain",
         ),
         (
-            "syar 1;output main=fill(fbm(p,octaves:13));",
-            "invalid constant octaves",
+            "syar 1;output main=rgba(log(0),0,0);",
+            "invalid constant mathematical domain",
         ),
         (
-            "syar 1;output main=fill(fbm(p,octaves:2.5));",
+            "syar 1;use std;output main=fill(fbm(p,octaves:2.5));",
+            "incorrect group argument type",
+        ),
+        (
+            "syar 1;use std;output main=rgba(mandelbrot(p,128),0,0);",
+            "unknown operation",
+        ),
+        (
+            "syar 1;use std;output main=rgba(true,0,0);",
             "incorrect type",
         ),
+        ("syar 1;use std;output main=0.5;", "outputs must be colors"),
         (
-            "syar 1;output main=rgba(mandelbrot(p,iterations:0),0,0);",
-            "invalid constant iterations",
+            "syar 1;use std;output main=rgba(1/0,0,0);",
+            "division by zero",
         ),
         (
-            "syar 1;output main=rgba(mandelbrot(p,iterations:1025),0,0);",
-            "invalid constant iterations",
-        ),
-        (
-            "syar 1;output main=rgba(mandelbrot(p,iterations:2.5),0,0);",
-            "incorrect type",
-        ),
-        ("syar 1;output main=rgba(true,0,0);", "incorrect type"),
-        ("syar 1;output main=0.5;", "outputs must be colors"),
-        ("syar 1;output main=rgba(1/0,0,0);", "division by zero"),
-        (
-            "syar 1;output main=rgba(0,0,0); /* missing",
+            "syar 1;use std;output main=rgba(0,0,0); /* missing",
             "unterminated comment",
         ),
         (
-            "syar 1;output main=rgba(0,0,0);let x=1;let x=2;",
+            "syar 1;use std;output main=rgba(0,0,0);let x=1;let x=2;",
             "duplicate or reserved",
         ),
         (
-            "syar 1;group broken(a:float)->color{return unknown;}output main=rgba(0,0,0);",
+            "syar 1;use std;group broken(a:float)->color{return unknown;}output main=rgba(0,0,0);",
             "unknown name",
         ),
     ] {
@@ -78,7 +79,7 @@ fn diagnoses_invalid_documents() {
 }
 #[test]
 fn source_preserving_edits_and_metadata() {
-    let source = "syar 1;\n// keep this\nparam size: float = 0.3; // trailing\noutput main=fill(circle(p,size));\n";
+    let source = "syar 1;use std;\n// keep this\nparam size: float = 0.3; // trailing\noutput main=fill(circle(p,size));\n";
     let doc = parse(source).unwrap();
     let edited = doc
         .replace_expression(doc.parameters[0].default.span, "0.4")
@@ -97,9 +98,10 @@ fn source_preserving_edits_and_metadata() {
 
 #[test]
 fn comments_inside_replaced_expressions_survive() {
-    let doc =
-        parse("syar 1;param value:float=(/* artist note */ 0.5);output main=rgba(value,0,0);")
-            .unwrap();
+    let doc = parse(
+        "syar 1;use std;param value:float=(/* artist note */ 0.5);output main=rgba(value,0,0);",
+    )
+    .unwrap();
     let edited = doc
         .replace_expression(doc.parameters[0].default.span, "0.7")
         .unwrap();
@@ -109,13 +111,16 @@ fn comments_inside_replaced_expressions_survive() {
 #[test]
 fn seed_preserves_all_u32_bits() {
     for seed in [0, 16_777_217, u32::MAX] {
-        let doc = parse(&format!("syar 1;seed {seed};output main=rgba(0,0,0);")).unwrap();
+        let doc = parse(&format!(
+            "syar 1;use std;seed {seed};output main=rgba(0,0,0);"
+        ))
+        .unwrap();
         assert_eq!(doc.seed, seed);
     }
 }
 #[test]
 fn unicode_comments_and_strings_have_source_positions() {
-    let source = "syar 1;\n// café 🌀\noutput main=unknown;";
+    let source = "syar 1;use std;\n// café 🌀\noutput main=unknown;";
     let error = compile(&parse(source).unwrap()).unwrap_err();
     assert_eq!((error.line, error.column), (3, 13));
 }
@@ -123,6 +128,7 @@ fn unicode_comments_and_strings_have_source_positions() {
 fn registry_is_unique_and_documented() {
     let ops = operations();
     let mut seen = std::collections::BTreeSet::new();
+    assert!(operation("mandelbrot").is_none());
     for op in ops {
         assert!(seen.insert(op.name));
         assert!(!op.description.is_empty());
@@ -131,8 +137,10 @@ fn registry_is_unique_and_documented() {
 }
 #[test]
 fn numeric_promotion_and_parameter_contract() {
-    let p = compile(&parse("syar 1;param a:float=1;let v=1.5+1;output main=rgba(v,0,0);").unwrap())
-        .unwrap();
+    let p = compile(
+        &parse("syar 1;use std;param a:float=1;let v=1.5+1;output main=rgba(v,0,0);").unwrap(),
+    )
+    .unwrap();
     assert_eq!(p.nodes[p.named_nodes["v"]].ty, Type::Float);
     assert_eq!(p.defaults()[0].ty, Type::Float);
     assert!(p.check_parameters(&[Value::float(f32::NAN)]).is_err());
@@ -140,7 +148,7 @@ fn numeric_promotion_and_parameter_contract() {
 #[test]
 fn nesting_is_bounded_without_stack_overflow() {
     let source = format!(
-        "syar 1;output main=rgba({}0{},0,0);",
+        "syar 1;use std;output main=rgba({}0{},0,0);",
         "sin(".repeat(200),
         ")".repeat(200)
     );
@@ -149,15 +157,11 @@ fn nesting_is_bounded_without_stack_overflow() {
 
 #[test]
 fn reusable_groups_are_validated_with_dynamic_inputs() {
-    let source = "syar 1;group primitive(q:vec2,n:int)->float{let d=polygon(q,sides:n);let a=box(q,size:q);return union(d,a);}output main=rgba(0,0,0);";
+    let source = "syar 1;use std;group primitive(q:vec2,n:int)->float{let d=polygon(q,sides:n);let a=box(q,size:q);return union(d,a);}output main=rgba(0,0,0);";
     assert!(compile(&parse(source).unwrap()).is_ok());
-    let source = "syar 1;group local(q:vec2)->color{let paint=fill(d);let d=circle(q);return paint;}output main=local(p);";
+    let source = "syar 1;use std;group local(q:vec2)->color{let paint=fill(d);let d=circle(q);return paint;}output main=local(p);";
     assert!(compile(&parse(source).unwrap()).is_ok());
-    let source = "syar 1;output main=rgba(periodic_noise(p,vec2(0,4)),0,0);";
-    assert!(
-        compile(&parse(source).unwrap())
-            .unwrap_err()
-            .message
-            .contains("positive")
-    );
+    // Library controls are mathematical values clamped by the source algorithm.
+    let source = "syar 1;use std;output main=rgba(periodic_noise(p,vec2(0,4)),0,0);";
+    assert!(compile(&parse(source).unwrap()).is_ok());
 }

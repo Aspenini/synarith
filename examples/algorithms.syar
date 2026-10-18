@@ -1,0 +1,21 @@
+syar 1;
+use std;
+// User-written Julia iteration. See mandelbrot.syar for another document-defined fractal.
+viewbox(-1.6, -1.0, 3.2, 2.0);
+param iterations: int = 80;
+param julia: vec2 = vec2(-0.72, 0.19);
+
+fn orbit(q: vec2, c: vec2, steps: int) -> float {
+    var z = q;
+    var trap: float = 1.0;
+    for i in 0..256 {
+        if i >= steps { break; }
+        z = vec2(x(z) * x(z) - y(z) * y(z), 2.0 * x(z) * y(z)) + c;
+        trap = min(trap, abs(length(z) - 0.5));
+        if dot(z, z) > 256.0 { return exp(-trap * 8.0) * 0.7; }
+    }
+    return 1.0;
+}
+
+let value = orbit(p, julia, iterations);
+output main = ramp(value, srgb("#030816"), srgb("#16496b"), srgb("#43d9ca"), srgb("#ffce8e"));

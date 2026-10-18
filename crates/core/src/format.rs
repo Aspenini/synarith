@@ -9,6 +9,7 @@
 //!
 //! ```text
 //! syar 1;
+//! use std;
 //! seed 4294967295;
 //! viewbox (-1.0, -0.5, 2.0, 1.0);
 //!
@@ -30,26 +31,171 @@
 //!
 //! ```text
 //! document  = "syar" "1" ";" declaration+
-//! declaration = "seed" u32 ";"
+//! declaration = "use" "std" ";"
+//!             | "seed" u32 ";"
 //!             | "viewbox" "(" number "," number "," number "," number ")" ";"
 //!             | "param" identifier ":" type "=" constant ";"
 //!             | "let" identifier "=" expression ";"
 //!             | "output" identifier "=" expression ";"
 //!             | "group" identifier "(" typed-arguments? ")" "->" type
 //!                   "{" let-declaration* "return" expression ";" "}"
+//!             | "fn" identifier "(" typed-arguments? ")" "->" type block
 //!             | "editor" json-string ";"
+//! typed-argument = identifier ":" type ("=" constant)?
 //! type = "float" | "int" | "bool" | "vec2" | "color"
 //! ```
 //!
 //! There must be at least one named color output. Names are unique within their namespace; output
 //! names are separate from expression names. Groups and global values share a declaration
-//! namespace. Built-in function names may also be value names (`param scale: float = 6.0;` is
-//! valid), but cannot be group names. `p`, `t`, `pi`, `tau`, `true`, and `false` are reserved.
+//! namespace together with functions. Built-in function names may also be value names
+//! (`param scale: float = 6.0;` is valid), but cannot name groups/functions. Built-in variables,
+//! boolean literals, declaration keywords, and control-flow keywords are reserved.
 //!
 //! Global and group-local references may point forward, but must form acyclic graphs. Groups have
 //! typed inputs and exactly one typed result. Direct and indirect recursion are errors. Groups can
 //! capture global parameters/fields; explicit inputs are recommended when reusing a group with
 //! different sources. Every group is validated, including unused definitions.
+//!
+//! ## Small core and source-defined library
+//!
+//! Only scalar/vector math, logic, color construction/channels/interpolation,
+//! premultiplied alpha compositing, deterministic hashing, and field sampling are native
+//! operations. [`crate::operations`] lists the complete core. Noise algorithms, shapes,
+//! gradients, paths, transforms, blend modes, and effects are ordinary typed Synarith
+//! functions/groups in [`crate::standard_library_source`]. `use std;` explicitly opts into
+//! that bundled source library. Only reachable definitions are added; unused helpers do not
+//! consume graph limits. Local definitions can replace library helpers. No file lookup,
+//! network access, external imports, or hidden native algorithm substitution occurs.
+//!
+//! [`crate::expand_standard_library`] and `syar fmt FILE --expand-std` embed the required
+//! definitions and remove the directive, producing a standalone document. Original comments
+//! and layout remain intact. The expanded source follows the same type, recursion, loop,
+//! node, and evaluation limits as handwritten definitions. Errors in imported definitions
+//! are reported at the `use std;` directive; errors in document expressions retain their
+//! original positions. Mandelbrot and other named fractals are never implicitly provided.
+//!
+//! Both functions and groups accept optional constant argument defaults, e.g.
+//! `fn circle(q: vec2, radius: float = 0.3) -> float { return length(q)-abs(radius); }`.
+//! Defaults use the parameter-constant grammar, are checked even when unused, and may be
+//! omitted with positional or named calls. Each argument is supplied at most once.
+//!
+//! ### Compilation and runtime layers
+//!
+//! `synarith-stdlib` owns portable algorithm source and has no dependencies. The
+//! compiler owns parsing, source-preserving expansion, typing, bounds, and lowering.
+//! [`crate::ExecutionPlan`] schedules reachable expression blocks in dependency order,
+//! reusing a shared node within one expression. Source samplers and their coordinate
+//! expressions have independent blocks. Each statement reevaluates its values after local
+//! mutation; function calls and resampling create separate register contexts.
+//! All source definitions are still semantically validated, including unused ones.
+//!
+//! Both backends consume this schedule and the same structured function instructions.
+//! CPU execution uses registers where sharing justifies them and direct evaluation
+//! for small trees. GPU emission uses explicit temporaries and native shader loops.
+//! Loops are never expanded into thousands of copied expression nodes. Prepared
+//! CPU schedules and GPU pipelines are reusable across time, parameters, and tiles.
+//! CPU code remains interpreted; no machine-code JIT is included. A plan is limited
+//! to 262144 scheduled operations, independently of source and per-sample work limits.
+//!
+//! ### Sampling primitives
+//!
+//! `sample_at(source, coordinates)` reevaluates a field at arbitrary document coordinates.
+//! Its footprint is propagated using forward differences of the coordinate expression.
+//! `pixel_size()` is the current scalar sample spacing in document units (zero for an
+//! unfiltered point sample). `footprint(source)` returns zero at zero spacing; otherwise
+//! it measures the absolute X plus absolute Y central differences for a scalar, or the
+//! maximum X/Y forward-difference vector length for `vec2`. Differencing evaluates the
+//! source with zero footprint, preventing recursive derivative estimation.
+//!
+//! Groups preserve field expressions, so a blur group can call `sample_at` repeatedly.
+//! Functions evaluate arguments once, so expensive sampled values should be passed to a
+//! function for reuse. Sampling cannot recover spatial variation from an already evaluated
+//! function-local value; wrap the complete function call in `sample_at` or a filter group.
+//! `footprint` and `pixel_size` describe sampling, not an image's composition or view box.
+//!
+//! ### Deterministic randomness
+//!
+//! `hash(cell, seed: 0, stream: 0, channel: 0)` floors XY and clamps them to the f32-representable
+//! i32 range [-2147483648, 2147483520]. All hash arithmetic wraps in u32. The effective seed
+//! is `((document_seed XOR u32(seed)) + u32(stream)) XOR (u32(channel) * 0x68bc21eb)`.
+//! The lattice word is `u32(x)*0x9e3779b9 XOR u32(y)*0x85ebca6b XOR effective_seed`.
+//! Avalanche steps are `v ^= v >> 16; v *= 0x7feb352d; v ^= v >> 15; v *= 0x846ca68b;
+//! v ^= v >> 16`. The top 24 bits divided by 16777216 produce a value in [0,1).
+//! Seed overrides replace the full document u32 seed; integer arguments use the checked
+//! language integer range. CPU/GPU share the exact algorithm. Continuous noise,
+//! interpolation, octave accumulation, and cellular searches are implemented in `.syar`.
+//!
+//! ## Mathematical functions and iteration
+//!
+//! Pure `fn` definitions support typed arguments/results, immutable `let`, mutable `var`,
+//! assignment (`=`, `+=`, `-=`, `*=`, `/=`), `if`/`else if`/`else`, bounded loops, `break`,
+//! `continue`, and early `return`. They may call other functions, groups, and built-ins.
+//! Every definition is validated, including unused ones. Direct/indirect recursion is rejected.
+//!
+//! ```
+//! use synarith_core::{parse, compile};
+//! let program = compile(&parse(r##"syar 1;use std;
+//! fn julia(q: vec2, c: vec2, steps: int) -> float {
+//!     var z = q;
+//!     for i in 0..256 {
+//!         if i >= steps { break; }
+//!         z = vec2(x(z)*x(z)-y(z)*y(z), 2.0*x(z)*y(z)) + c;
+//!         if dot(z,z) > 256.0 { return float(i) / float(steps); }
+//!     }
+//!     return 1.0;
+//! }
+//! output main = mix(srgb("#071326"), srgb("#efc68b"), julia(p, vec2(-0.72,0.19), 80));
+//! "##)?)?;
+//! assert_eq!(program.functions.len(), 1);
+//! assert!(program.nodes.len() < 80); // The loop body is compiled only once.
+//! # Ok::<(), synarith_core::Diagnostic>(())
+//! ```
+//!
+//! ```text
+//! block     = "{" statement* "}"
+//! statement = ("let" | "var") identifier (":" type)? "=" expression ";"
+//!           | identifier ("=" | "+=" | "-=" | "*=" | "/=") expression ";"
+//!           | "if" expression block ("else" (block | if-statement))?
+//!           | "for" identifier "in" integer-expression ".." integer-expression block
+//!           | "while" expression "limit" integer-expression block
+//!           | ("break" | "continue") ";"
+//!           | "return" expression ";"
+//! ```
+//!
+//! Local types are inferred unless annotated. Assignment preserves a variable's type, permitting
+//! integer-to-float promotion. Arguments and loop indices are immutable. Bindings are visible
+//! after declaration and inside nested blocks; block-local names do not leak, and locals cannot
+//! shadow another visible local. Every path must return the declared type. Unreachable statements
+//! following a guaranteed exit are errors.
+//!
+//! `for` ranges are half open, with `0 <= start <= end <= 4096`. `while condition limit N` tests
+//! the boolean condition before each step and executes at most `N` times; exhausting the limit
+//! exits normally. Bounds must be compile-time integer arithmetic, including immutable integer
+//! constants. For a dynamic iteration count, use a constant bound and `if i >= steps { break; }`.
+//!
+//! ```text
+//! var estimate = 1.0;
+//! var error = 1.0;
+//! while error > 0.00001 limit 64 {
+//!     let next = 0.5 * (estimate + 2.0 / estimate);
+//!     error = abs(next - estimate);
+//!     estimate = next;
+//! }
+//! ```
+//!
+//! Documents accept at most 128 functions and 4096 total function instructions. Each function
+//! accepts at most 16 arguments and 128 local slots, including arguments and nested-block
+//! bindings. CPU and WGSL execute structured loop bodies directly, without graph unrolling.
+//! Worst-case work, including nested loops, calls, conditions, and source sampling, counts toward
+//! the two-million-step sample budget. All state belongs to one call at one sample; there is no
+//! shared mutation, frame history, I/O, or imported executable shader code.
+//!
+//! Function locals hold evaluated values; sampling a local again within its call reads that
+//! stored value. To resample an algorithm spatially, wrap its complete call, for example
+//! `blur(field(p), 0.01)` or `sample_at(field(p), p * 2.0)`. The whole function is then reevaluated
+//! at each requested coordinate. Footprint inference cannot recover derivatives through stored
+//! iterative values; use supersampling for high-frequency custom algorithms.
+//! See `examples/algorithms.syar` and the volumetric `examples/deep-space.syar` wallpaper.
 //!
 //! ## Expressions and types
 //!
@@ -112,27 +258,31 @@
 //! remain linear and premultiplied.
 //!
 //! Runtime division by an effectively zero denominator yields zero. Invalid/nonfinite numeric
-//! results are sanitized to zero. Operations with count/radius controls clamp dynamic values to
-//! their documented safe bounds; invalid known constant arguments are diagnosed before rendering.
+//! results are sanitized to zero. Invalid known constant core mathematical domains are diagnosed
+//! before rendering. Source-library algorithms clamp count/radius controls as specified in their
+//! code, equally for constant and dynamic inputs.
 //! Seeded noise uses a fixed integer hash. Transcendentals and platform arithmetic can produce
 //! small differences; bitwise identity across platforms is not guaranteed.
 //!
-//! ## Procedural operation families
+//! ## Source-library algorithm families
 //!
-//! - **Fractals:** `mandelbrot(p, iterations: 128)` iterates `z = z² + p` from zero
-//!   for 1–1024 steps. It returns a smooth normalized escape count in `[0, 1)` or
-//!   one if no escape is observed. Its escape radius is 16. Finite iterations
-//!   approximate set membership; f32 precision limits deep zooms. Use supersampling
-//!   for boundary detail. Long boundary orbits can amplify tiny CPU/GPU rounding
-//!   differences, producing different escape counts near the set edge.
-//!   See `examples/mandelbrot.syar` for a colored, animated view.
+//! Image algorithms are written in `.syar`. The families below require `use std;` or their
+//! explicit source definitions, rather than native opcodes. For example,
+//! `examples/mandelbrot.syar` defines `mandelbrot(c, iterations)` as an ordinary typed function:
+//! a radius-16 escape test, bounded iteration of `z = z² + c`, and logarithmic smoothing.
+//! The example preserves its animated palette and clamps its own count to 1–1024.
+//! Copy its definition into documents that need it; calling an undefined `mandelbrot()` is an
+//! unknown-operation error. Julia, Barnsley fern, and nebula integration likewise live in their
+//! example documents. Finite iteration approximates membership, and f32 precision limits zooms;
+//! long boundary orbits can amplify small CPU/GPU arithmetic differences.
+//!
 //! - **Math and logic:** arithmetic nodes, trigonometry, power, exponential/logarithmic functions,
 //!   clamps, steps, interpolation, conversions, comparisons, boolean operations, vector
 //!   length/dot/normalization.
 //! - **Noise:** quintic-interpolated value noise, gradient noise, cellular distance, fractal noise,
 //!   turbulence, ridged noise, and integral-period lattice noise. Fractals use 1–12 octaves.
 //!   Cellular uses a bounded 3×3 neighborhood. `periodic_noise` takes positive integral lattice
-//!   periods.
+//!   periods, rounded and clamped to at least one by the library.
 //! - **Gradients:** linear projection, radial distance, angular position, and a four-stop color
 //!   ramp. Ramp endpoints are 0 and 1, with two movable internal stops `p1` and `p2`.
 //! - **Shapes:** circle, half-extent rectangle, rounded rectangle, approximate ellipse distance,
@@ -144,8 +294,8 @@
 //!   `fill(path(...))` fills it; `stroke(path(...),width)` outlines it. Multiple fields can be
 //!   combined through distance operations. Tolerance has a practical bound at the segment cap.
 //! - **Coordinates and resampling:** translation, rotation, per-axis scaling, centered repetition,
-//!   mirroring, polar mapping, arbitrary coordinate sampling with `transform(source,coordinates)`,
-//!   and `warp(source,displacement)`.
+//!   mirroring, polar mapping, arbitrary coordinate sampling with `sample_at(source,coordinates)`,
+//!   and a scalar `warp(source,displacement)` helper. Use `sample_at` directly for other types.
 //! - **Effects:** signed-distance fill/stroke/exterior outline/glow, opacity and masking,
 //!   straight-RGB inversion, linear grayscale/contrast/saturation, bounded 3×3 Gaussian blur, and
 //!   height-derived normal color. Blur radius and derivative epsilon are in document units. No
@@ -169,14 +319,14 @@
 //! estimated expanded evaluation budget of two million per sample. Compilation includes reusable
 //! group validation. Individual float render regions are capped at 1 GiB; streamed PNG export uses
 //! smaller strips. Dimensions are 1–1048576 per axis, subject to resource and PNG limits. No file,
-//! network, process, include, plugin, or arbitrary code execution is part of the language.
+//! network, process, include, plugin, or external code execution is part of the language.
 //!
 //!
 //! ## Parse and inspect a document
 //!
 //! ```
 //! use synarith_core::{parse, compile};
-//! let document = parse(r#"syar 1;
+//! let document = parse(r#"syar 1;use std;
 //! param radius: float = 0.2;
 //! let distance = circle(p - vec2(0.5, 0.5), radius);
 //! output main = fill(distance, rgba(0.3, 0.7, 1.0));

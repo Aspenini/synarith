@@ -12,6 +12,7 @@
 //!
 //! let program = load(r##"
 //! syar 1;
+//! use std;
 //! param scale: float = 6.0;
 //! let clouds = fbm(p * scale + vec2(t * 0.2, 0.0), octaves: 6);
 //! output main = mix(srgb("#13254b"), srgb("#f4c879"), clouds);
@@ -51,21 +52,31 @@
 //!
 //! # Architecture
 //!
-//! Source → span-preserving syntax tree → validated typed graph → CPU or WGSL
-//! evaluation → sampled pixels. The compiler rejects cycles and expands groups;
-//! the operation registry supplies signatures, defaults, and discovery metadata.
-//! CPU evaluation parallelizes rows, while GPU evaluation dispatches compute
-//! workgroups with explicit position and sampling footprints. Both sample the
-//! procedural fields directly, including transformed sources, blur, and normals.
+//! Three layers separate reusable algorithms from execution:
+//!
+//! 1. **User documents:** mathematical fields, functions, bounded loops, and outputs.
+//! 2. **Standard library:** dependency-free `synarith-stdlib` data, entirely `.syar` source.
+//! 3. **Compiler/runtime:** typed graph and structured functions → [`ExecutionPlan`] →
+//!    CPU expression evaluation or WGSL/native GPU execution.
+//!
+//! Source imports use a cached dependency index, adding only required definitions.
+//! Execution schedules evaluate shared expressions once in a sampling context;
+//! they never reuse values across mutation, coordinates, or footprints. Loops stay
+//! structured. CPU execution chooses registers for substantial sharing and direct
+//! trees for small cases. It remains an interpreter with no machine-code JIT.
+//! GPU emission uses explicit temporaries and omits unreachable functions.
+//! [`Renderer`] caches CPU schedules and GPU pipelines by output across frames and
+//! tiled exports. The low-level [`CpuProgram`] also supports prepared point sampling.
 //!
 //! | Crate | Responsibility |
 //! | --- | --- |
 //! | `synarith` | Public API, backend selection, overrides, tiled PNG export |
+//! | `synarith-stdlib` | Portable noise, shapes, gradients, and effects written in Synarith |
 //! | `synarith-core` | Source preservation, diagnostics, operation registry, compiler |
 //! | `synarith-cpu` | Reference evaluator, point samples, regions, pixel conversion |
 //! | `synarith-gpu` | WGSL compiler, native compute pipelines, readback |
 //! | `synarith-cli` | `syar` command-line executable |
-//! | `synarith-viewer` | Small native `syar-view` executable; renders via CLI |
+//! | `synarith-viewer` | Egui `syar-view`; live playback, source watching, and camera navigation |
 //!
 //! Only compiler-produced [`Program`] values satisfy renderer invariants. Manually
 //! constructing or mutating a graph into an invalid state is unsupported. Numeric
@@ -111,6 +122,7 @@ pub struct Renderer {
     program: Program,
     requested: Backend,
     warnings: Vec<String>,
+    cpu: std::collections::BTreeMap<String, CpuProgram>,
     #[cfg(feature = "gpu")]
     gpu: Option<synarith_gpu::GpuRenderer>,
     #[cfg(feature = "gpu")]
@@ -126,6 +138,7 @@ impl Renderer {
             program,
             requested: Backend::Cpu,
             warnings: Vec::new(),
+            cpu: Default::default(),
             #[cfg(feature = "gpu")]
             gpu: None,
             #[cfg(feature = "gpu")]
@@ -233,7 +246,13 @@ impl Renderer {
                 }
             }
         }
-        synarith_cpu::render_region(&self.program, options, region)
+        if !self.cpu.contains_key(&options.output) {
+            self.cpu.insert(
+                options.output.clone(),
+                CpuProgram::for_output(&self.program, &options.output)?,
+            );
+        }
+        self.cpu[&options.output].render_region(&self.program, options, region)
     }
     /// Render a complete row-major linear premultiplied RGBA image in bounded strips.
     ///

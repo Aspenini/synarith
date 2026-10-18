@@ -2,10 +2,6 @@
 /out/
 /dist/
 
-# Private viewer preview and export staging directories.
-.syar-view-*/
-.syar-export-*/
-
 # Local editor, operating-system, and backup files.
 /.vs/
 .DS_Store

@@ -1,0 +1,50 @@
+syar 1;
+// The Koch snowflake, constructed from its base-four segment addresses.
+// No shape or fractal opcode: each finite-generation edge is arithmetic.
+// main draws from t=0 to draw_seconds; still shows the complete snowflake.
+viewbox(-0.95, -0.9, 1.9, 1.8);
+param depth: int = 4;
+param draw_seconds: float = 10.0;
+param line_width: float = 0.0028;
+param ink: color = srgb("#75e5ff");
+param paper: color = srgb("#060d1c");
+
+fn segment_distance(q: vec2, a: vec2, b: vec2) -> float {
+    let d = b-a;
+    return length(q-a-d*clamp(dot(q-a,d)/max(dot(d,d),0.0000000001),0.0,1.0));
+}
+fn snowflake(q: vec2, progress: float) -> color {
+    let generation = int(clamp(float(depth),0.0,4.0));
+    let edge_count = int(pow(4.0,float(generation)));
+    let count = edge_count*3;
+    let length_step = 1.2/pow(3.0,float(generation));
+    let visible = clamp(progress,0.0,1.0)*float(count);
+    var position = vec2(-0.6,0.35);
+    var nearest = 100.0;
+    var phase = 0.0;
+    for index in 0..768 {
+        if float(index)>=visible {break;}
+        let side = int(float(index)/float(edge_count));
+        var angle = -float(side)*tau/3.0;
+        var address = index%edge_count;
+        for level in 0..4 {
+            if level>=generation {break;}
+            let digit = address%4;
+            if digit==1 {angle+=pi/3.0;}
+            if digit==2 {angle-=pi/3.0;}
+            address = int(float(address)/4.0);
+        }
+        let next = position+vec2(cos(angle),sin(angle))*length_step;
+        let endpoint = mix(position,next,clamp(visible-float(index),0.0,1.0));
+        let distance = segment_distance(q,position,endpoint);
+        if distance<nearest {nearest=distance;phase=float(index)/float(count);}
+        position = next;
+    }
+    let width = max(abs(line_width),pixel_size()*0.7);
+    let coverage = 1.0-smoothstep(width*0.55,width*1.5,nearest);
+    let halo = exp(-nearest/max(width*5.0,0.00001))*0.28;
+    let pigment = mix(ink,srgb("#e9caff"),0.5+0.5*sin(phase*tau+t*0.35));
+    return over(opacity(pigment,clamp(coverage+halo,0.0,1.0)),paper);
+}
+output main = snowflake(p,t/max(draw_seconds,0.01));
+output still = snowflake(p,1.0);
