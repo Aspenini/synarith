@@ -81,5 +81,29 @@ fn main() {
         }
         times.sort_by(f64::total_cmp);
         println!("{name},parallel_render,128,128,{:.3}", times[1]);
+        // Same image size and loop work at each scale; buffers and program size
+        // stay constant. Report actual timings rather than promising a frame rate.
+        if name == "shared_iteration" {
+            for zoom in [1.0, 1e6, 1e12] {
+                let deep = RenderOptions {
+                    precise_viewport: Some([
+                        0.5 - 0.5 / zoom,
+                        0.5 - 0.5 / zoom,
+                        1. / zoom,
+                        1. / zoom,
+                    ]),
+                    ..options.clone()
+                };
+                renderer.render(&deep).unwrap();
+                let mut times = vec![];
+                for _ in 0..3 {
+                    let start = Instant::now();
+                    std::hint::black_box(renderer.render(&deep).unwrap());
+                    times.push(start.elapsed().as_secs_f64() * 1000.);
+                }
+                times.sort_by(f64::total_cmp);
+                println!("{name},f64_zoom_{zoom:.0e},128,128,{:.3}", times[1]);
+            }
+        }
     }
 }

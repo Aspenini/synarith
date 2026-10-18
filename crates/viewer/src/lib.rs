@@ -4,7 +4,9 @@
 //! watching, reusable CPU/GPU programs, cancellation, and export. No CLI process
 //! or temporary preview PNG is involved. Playback starts at zero without a loop
 //! endpoint. Paused views still resample when navigating. Camera navigation uses
-//! f64; language evaluation retains its documented f32 precision.
+//! f64; normal views use the f32 CPU/GPU path, with automatic f64 CPU arithmetic
+//! for deeper camera views. Compiled constants and parameter values retain f32
+//! representation. No examples or algorithm presets are embedded in the UI.
 #![deny(missing_docs)]
 mod camera;
 mod worker;

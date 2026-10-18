@@ -22,7 +22,9 @@
 //! semantics; [`CpuProgram::sample`] uses the prepared path. CPU execution is an
 //! interpreter with no JIT dependency. Rows are distributed through Rayon.
 //! Hashes and operation semantics match the GPU backend; floating-point results
-//! need not be bit-identical.
+//! need not be bit-identical. [`RenderOptions::precise_viewport`] evaluates the same
+//! scheduled graph with f64 intermediate arithmetic and coordinates on CPU. Source
+//! constants and parameter values retain their compiled f32 representation.
 //!
 //! # Limits and cancellation
 //!
@@ -78,6 +80,10 @@ pub struct RenderOptions {
     /// Optional document-space camera rectangle; `None` uses the document view box.
     /// Changing it resamples the field without recompilation.
     pub viewport: Option<[f32; 4]>,
+    /// Optional f64 camera rectangle and CPU arithmetic. Takes precedence over
+    /// `viewport`; Auto selects CPU without discarding cached GPU resources.
+    /// Required GPU mode rejects this option. Constants/parameters remain f32.
+    pub precise_viewport: Option<[f64; 4]>,
     /// Finite frame time in seconds.
     pub time: f32,
     /// Exact seed override; `None` uses the document seed.
@@ -97,6 +103,7 @@ impl Default for RenderOptions {
             width: 512,
             height: 512,
             viewport: None,
+            precise_viewport: None,
             time: 0.,
             seed: None,
             samples: 1,
@@ -152,17 +159,42 @@ impl RenderOptions {
         if !(1..=8).contains(&self.samples) {
             return Err("samples per axis must be between 1 and 8".into());
         }
-        let view = self.viewport.unwrap_or(program.viewbox);
+        let view = self
+            .precise_viewport
+            .unwrap_or_else(|| self.viewport.unwrap_or(program.viewbox).map(f64::from));
+        let unit = (view[2] / f64::from(self.width)).max(view[3] / f64::from(self.height));
         if !view.iter().all(|v| v.is_finite())
             || view[2] <= 0.
             || view[3] <= 0.
             || !(view[0] + view[2]).is_finite()
             || !(view[1] + view[3]).is_finite()
-            || Mapping::new(view, self.width, self.height).units_per_pixel <= 0.
+            || !unit.is_finite()
+            || unit <= 0.
         {
             return Err(
                 "viewport must be finite, positive, and representable at this resolution".into(),
             );
+        }
+        if self.precise_viewport.is_some() {
+            let step = unit / f64::from(self.samples);
+            if step * 0.5 == 0.
+                || [view[0], view[1], view[0] + view[2], view[1] + view[3]]
+                    .iter()
+                    .any(|v| v + step == *v)
+            {
+                return Err("viewport sampling exceeds f64 coordinate precision; zoom out or reduce resolution".into());
+            }
+        }
+        if self.precise_viewport.is_none()
+            && Mapping::new(
+                self.viewport.unwrap_or(program.viewbox),
+                self.width,
+                self.height,
+            )
+            .units_per_pixel
+                <= 0.
+        {
+            return Err("viewport sampling width underflows f32; use precise_viewport".into());
         }
         if !self.time.is_finite() {
             return Err("time must be finite".into());
@@ -298,6 +330,9 @@ impl CpuProgram {
         } else {
             options.parameters.clone()
         };
+        if let Some(view) = options.precise_viewport {
+            return self.render_precise(program, options, region, &parameters, view);
+        }
         let evaluator = Evaluator {
             program,
             parameters: &parameters,
@@ -350,6 +385,79 @@ impl CpuProgram {
                     }
                     let count = (options.samples * options.samples) as f32;
                     *pixel = total.map(|v| finite(v / count));
+                }
+                Ok(())
+            })?;
+        Ok(pixels)
+    }
+    fn render_precise(
+        &self,
+        program: &Program,
+        options: &RenderOptions,
+        region: Region,
+        parameters: &[Value],
+        view: [f64; 4],
+    ) -> Result<Vec<Pixel>, String> {
+        let output = program.output(&options.output)?;
+        let evaluator = Evaluator64 {
+            program,
+            parameters,
+            time: f64::from(options.time),
+            seed: options.seed.unwrap_or(program.seed),
+        };
+        let unit = (view[2] / f64::from(options.width)).max(view[3] / f64::from(options.height));
+        // Keep offsets relative to the center until the final coordinate addition.
+        let center = [view[0] + view[2] * 0.5, view[1] + view[3] * 0.5];
+        let mut pixels = Vec::new();
+        let len = region.width as usize * region.height as usize;
+        pixels
+            .try_reserve_exact(len)
+            .map_err(|_| "unable to allocate render region")?;
+        pixels.resize(len, [0.; 4]);
+        pixels
+            .par_chunks_mut(region.width as usize)
+            .enumerate()
+            .try_for_each(|(row, pixels)| -> Result<(), String> {
+                if options.cancellation.is_cancelled() {
+                    return Err("render cancelled".into());
+                }
+                for (col, pixel) in pixels.iter_mut().enumerate() {
+                    if col % 64 == 0 && options.cancellation.is_cancelled() {
+                        return Err("render cancelled".into());
+                    }
+                    let mut total = [0.; 4];
+                    for sy in 0..options.samples {
+                        for sx in 0..options.samples {
+                            let x = f64::from(region.x)
+                                + col as f64
+                                + (f64::from(sx) + 0.5) / f64::from(options.samples);
+                            let y = f64::from(region.y)
+                                + row as f64
+                                + (f64::from(sy) + 0.5) / f64::from(options.samples);
+                            let p = [
+                                center[0] + (x - f64::from(options.width) * 0.5) * unit,
+                                center[1] + (y - f64::from(options.height) * 0.5) * unit,
+                            ];
+                            if p[0] >= view[0]
+                                && p[1] >= view[1]
+                                && p[0] <= view[0] + view[2]
+                                && p[1] <= view[1] + view[3]
+                            {
+                                let value = evaluator.eval_with(
+                                    output,
+                                    p,
+                                    unit / f64::from(options.samples),
+                                    &[],
+                                    Some(&self.plan),
+                                );
+                                for i in 0..4 {
+                                    total[i] += value[i];
+                                }
+                            }
+                        }
+                    }
+                    let count = f64::from(options.samples * options.samples);
+                    *pixel = total.map(|v| finite((v / count) as f32));
                 }
                 Ok(())
             })?;
@@ -482,447 +590,8 @@ pub fn pixel_rgba8(p: Pixel) -> [u8; 4] {
 pub fn finite(v: f32) -> f32 {
     if v.is_finite() { v } else { 0. }
 }
-fn splat(x: f32) -> Pixel {
-    [x; 4]
-}
-fn len(v: Pixel) -> f32 {
-    (v[0] * v[0] + v[1] * v[1]).sqrt()
-}
-fn mix(a: Pixel, b: Pixel, t: f32) -> Pixel {
-    std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t)
-}
-fn smooth(a: f32, b: f32, x: f32) -> f32 {
-    let t = if (b - a).abs() < 1e-10 {
-        if x >= b { 1. } else { 0. }
-    } else {
-        ((x - a) / (b - a)).clamp(0., 1.)
-    };
-    t * t * (3. - 2. * t)
-}
-fn safe_div(a: f32, b: f32) -> f32 {
-    if b.abs() > 1e-20 { a / b } else { 0. }
-}
-
-/// Fixed wrapping 32-bit avalanche hash shared with the WGSL backend.
-pub fn hash(mut x: u32) -> u32 {
-    x ^= x >> 16;
-    x = x.wrapping_mul(0x7feb352d);
-    x ^= x >> 15;
-    x = x.wrapping_mul(0x846ca68b);
-    x ^ (x >> 16)
-}
-/// Hash an integer lattice coordinate and seed to a value in `[0, 1)`.
-pub fn hash2(x: i32, y: i32, seed: u32) -> f32 {
-    ((hash((x as u32).wrapping_mul(0x9e3779b9) ^ (y as u32).wrapping_mul(0x85ebca6b) ^ seed) >> 8)
-        as f32)
-        / 16_777_216.
-}
-/// Low-level recursive CPU field evaluator.
-///
-/// Prefer [`sample`] for checked point sampling. Callers of this type must
-/// provide a compiler-produced graph and a matching validated parameter slice.
-pub struct Evaluator<'a> {
-    /// Compiler-produced graph; graph indices and types must remain valid.
-    pub program: &'a Program,
-    /// Complete parameter values matching [`Program::parameters`].
-    pub parameters: &'a [Value],
-    /// Finite frame time in seconds.
-    pub time: f32,
-    /// Exact effective seed after applying any override.
-    pub seed: u32,
-}
-enum Flow {
-    Next,
-    Break,
-    Continue,
-    Return(Pixel),
-}
-impl Evaluator<'_> {
-    fn call_function(
-        &self,
-        index: usize,
-        argument: impl Fn(usize) -> Pixel,
-        p: [f32; 2],
-        fp: f32,
-        plan: Option<&ExecutionPlan>,
-    ) -> Pixel {
-        let function = &self.program.functions[index];
-        let mut frame = [[0.; 4]; MAX_FUNCTION_LOCALS];
-        for (slot, value) in frame.iter_mut().enumerate().take(function.parameters.len()) {
-            *value = argument(slot);
-        }
-        match self.execute(
-            &function.body,
-            p,
-            fp,
-            &mut frame[..function.locals.len()],
-            plan,
-        ) {
-            Flow::Return(value) => value,
-            _ => [0.; 4], // Compiler validation guarantees a return on every path.
-        }
-    }
-    fn execute(
-        &self,
-        body: &[Instruction],
-        p: [f32; 2],
-        fp: f32,
-        locals: &mut [Pixel],
-        plan: Option<&ExecutionPlan>,
-    ) -> Flow {
-        for instruction in body {
-            match instruction {
-                Instruction::Store { slot, value } => {
-                    locals[*slot] = self.eval_with(*value, p, fp, locals, plan)
-                }
-                Instruction::Return(value) => {
-                    return Flow::Return(self.eval_with(*value, p, fp, locals, plan));
-                }
-                Instruction::Break => return Flow::Break,
-                Instruction::Continue => return Flow::Continue,
-                Instruction::If { condition, yes, no } => {
-                    let selected = if self.eval_with(*condition, p, fp, locals, plan)[0] != 0. {
-                        yes
-                    } else {
-                        no
-                    };
-                    let flow = self.execute(selected, p, fp, locals, plan);
-                    if !matches!(flow, Flow::Next) {
-                        return flow;
-                    }
-                }
-                Instruction::For {
-                    slot,
-                    start,
-                    end,
-                    body,
-                } => {
-                    for index in *start..*end {
-                        locals[*slot] = [index as f32; 4];
-                        match self.execute(body, p, fp, locals, plan) {
-                            Flow::Break => break,
-                            Flow::Return(value) => return Flow::Return(value),
-                            _ => (),
-                        }
-                    }
-                }
-                Instruction::While {
-                    condition,
-                    limit,
-                    body,
-                } => {
-                    for _ in 0..*limit {
-                        if self.eval_with(*condition, p, fp, locals, plan)[0] == 0. {
-                            break;
-                        }
-                        match self.execute(body, p, fp, locals, plan) {
-                            Flow::Break => break,
-                            Flow::Return(value) => return Flow::Return(value),
-                            _ => (),
-                        }
-                    }
-                }
-            }
-        }
-        Flow::Next
-    }
-    fn footprint(
-        &self,
-        id: usize,
-        p: [f32; 2],
-        fp: f32,
-        locals: &[Pixel],
-        plan: Option<&ExecutionPlan>,
-    ) -> f32 {
-        if fp <= 0. {
-            return 0.;
-        }
-        let center = self.eval_with(id, p, 0., locals, plan);
-        let dx = self.eval_with(id, [p[0] + fp, p[1]], 0., locals, plan);
-        let dy = self.eval_with(id, [p[0], p[1] + fp], 0., locals, plan);
-        ((dx[0] - center[0]).hypot(dx[1] - center[1]))
-            .max((dy[0] - center[0]).hypot(dy[1] - center[1]))
-    }
-    /// Evaluate a graph node at a document-space position and sampling footprint.
-    ///
-    /// Callers must supply a valid node index, finite inputs, a nonnegative footprint,
-    /// and a complete validated parameter slice.
-    /// Function-internal nodes require a local frame and must not be passed here;
-    /// evaluate an output or function-call node instead.
-    ///
-    /// # Panics
-    /// Panics on invalid graph/parameter indices; use [`sample`] for checked access.
-    pub fn eval(&self, id: usize, p: [f32; 2], fp: f32) -> Pixel {
-        self.eval_with(id, p, fp, &[], None)
-    }
-    fn eval_with(
-        &self,
-        id: usize,
-        p: [f32; 2],
-        fp: f32,
-        locals: &[Pixel],
-        plan: Option<&ExecutionPlan>,
-    ) -> Pixel {
-        if let Some(plan) = plan {
-            let block = plan.block(id).expect("scheduled expression root");
-            if block.reuse_registers {
-                return self.eval_registered(block, p, fp, locals, plan);
-            }
-        }
-        self.eval_node::<false>(id, p, fp, locals, plan, None)
-    }
-    #[inline(never)]
-    fn eval_registered(
-        &self,
-        block: &ExpressionBlock,
-        p: [f32; 2],
-        fp: f32,
-        locals: &[Pixel],
-        plan: &ExecutionPlan,
-    ) -> Pixel {
-        let mut small = [[0.; 4]; 32];
-        let mut large;
-        let values: &mut [Pixel] = if block.nodes.len() <= small.len() {
-            &mut small[..block.nodes.len()]
-        } else {
-            large = vec![[0.; 4]; block.nodes.len()];
-            &mut large
-        };
-        for (register, instruction) in block.nodes.iter().enumerate() {
-            values[register] = self.eval_node::<true>(
-                instruction.node,
-                p,
-                fp,
-                locals,
-                Some(plan),
-                Some((values, &instruction.inputs)),
-            );
-        }
-        values[block.nodes.len() - 1]
-    }
-    fn eval_node<const REGISTERED: bool>(
-        &self,
-        id: usize,
-        p: [f32; 2],
-        fp: f32,
-        locals: &[Pixel],
-        plan: Option<&ExecutionPlan>,
-        registers: Option<(&[Pixel], &[Option<usize>])>,
-    ) -> Pixel {
-        let node = &self.program.nodes[id];
-        let at = |index: usize| {
-            if REGISTERED {
-                let (values, inputs) = registers.unwrap();
-                values
-                    [inputs[index].expect("lazy sources are evaluated only by sampling operations")]
-            } else {
-                self.eval_node::<false>(node.inputs[index], p, fp, locals, plan, None)
-            }
-        };
-        let result = match &node.kind {
-            NodeKind::Constant(value) => value.data,
-            NodeKind::Local(slot) => locals[*slot],
-            NodeKind::Call(index) => self.call_function(*index, at, p, fp, plan),
-            NodeKind::Position => [p[0], p[1], 0., 0.],
-            NodeKind::Time => splat(self.time),
-            NodeKind::Parameter(index) => self.parameters[*index].data,
-            NodeKind::Unary(op) => {
-                let a = at(0);
-                match op.as_str() {
-                    "-" => a.map(|v| -v),
-                    "!" => splat(if a[0] == 0. { 1. } else { 0. }),
-                    _ => a,
-                }
-            }
-            NodeKind::Binary(op) => {
-                let a = at(0);
-                let b = at(1);
-                std::array::from_fn(|i| match op.as_str() {
-                    "+" => a[i] + b[i],
-                    "-" => a[i] - b[i],
-                    "*" => a[i] * b[i],
-                    "/" => safe_div(a[i], b[i]),
-                    "%" => a[i] - b[i] * (safe_div(a[i], b[i])).floor(),
-                    "<" => {
-                        if a[0] < b[0] {
-                            1.
-                        } else {
-                            0.
-                        }
-                    }
-                    ">" => {
-                        if a[0] > b[0] {
-                            1.
-                        } else {
-                            0.
-                        }
-                    }
-                    "<=" => {
-                        if a[0] <= b[0] {
-                            1.
-                        } else {
-                            0.
-                        }
-                    }
-                    ">=" => {
-                        if a[0] >= b[0] {
-                            1.
-                        } else {
-                            0.
-                        }
-                    }
-                    "==" => {
-                        if a[0] == b[0] {
-                            1.
-                        } else {
-                            0.
-                        }
-                    }
-                    "!=" => {
-                        if a[0] != b[0] {
-                            1.
-                        } else {
-                            0.
-                        }
-                    }
-                    "&&" => {
-                        if a[0] != 0. && b[0] != 0. {
-                            1.
-                        } else {
-                            0.
-                        }
-                    }
-                    "||" if (a[0] != 0. || b[0] != 0.) => 1.,
-                    _ => 0.,
-                })
-            }
-            NodeKind::Builtin(op) => {
-                // Source expressions stay lazy, including through expanded library groups.
-                if *op == Op::SampleAt {
-                    let coords = at(1);
-                    let transformed_fp = self.footprint(node.inputs[1], p, fp, locals, plan);
-                    return self.eval_with(
-                        node.inputs[0],
-                        [coords[0], coords[1]],
-                        transformed_fp,
-                        locals,
-                        plan,
-                    );
-                }
-                if *op == Op::PixelSize {
-                    return splat(fp);
-                }
-                if *op == Op::Footprint {
-                    let src = node.inputs[0];
-                    if fp <= 0. {
-                        return splat(0.);
-                    }
-                    if self.program.nodes[src].ty == Type::Vec2 {
-                        return splat(self.footprint(src, p, fp, locals, plan));
-                    }
-                    let dx = self.eval_with(src, [p[0] + fp * 0.5, p[1]], 0., locals, plan)[0]
-                        - self.eval_with(src, [p[0] - fp * 0.5, p[1]], 0., locals, plan)[0];
-                    let dy = self.eval_with(src, [p[0], p[1] + fp * 0.5], 0., locals, plan)[0]
-                        - self.eval_with(src, [p[0], p[1] - fp * 0.5], 0., locals, plan)[0];
-                    return splat(dx.abs() + dy.abs());
-                }
-                let a = at(0);
-                let b = if node.inputs.len() > 1 {
-                    at(1)
-                } else {
-                    [0.; 4]
-                };
-                let c = if node.inputs.len() > 2 {
-                    at(2)
-                } else {
-                    [0.; 4]
-                };
-                use Op::*;
-                match op {
-                    Add => std::array::from_fn(|i| a[i] + b[i]),
-                    Sub => std::array::from_fn(|i| a[i] - b[i]),
-                    Mul => std::array::from_fn(|i| a[i] * b[i]),
-                    Div => std::array::from_fn(|i| safe_div(a[i], b[i])),
-                    Mod => std::array::from_fn(|i| a[i] - b[i] * safe_div(a[i], b[i]).floor()),
-                    Less => splat(if a[0] < b[0] { 1. } else { 0. }),
-                    Greater => splat(if a[0] > b[0] { 1. } else { 0. }),
-                    Equal => splat(if a[0] == b[0] { 1. } else { 0. }),
-                    Not => splat(if a[0] == 0. { 1. } else { 0. }),
-                    And => splat(if a[0] != 0. && b[0] != 0. { 1. } else { 0. }),
-                    Or => splat(if a[0] != 0. || b[0] != 0. { 1. } else { 0. }),
-                    ToInt => splat(a[0].clamp(-16_777_216., 16_777_216.).trunc()),
-                    ToFloat => splat(a[0]),
-                    Vec2 => [a[0], b[0], 0., 0.],
-                    Rgba => {
-                        let d = at(3)[0].clamp(0., 1.);
-                        [a[0] * d, b[0] * d, c[0] * d, d]
-                    }
-                    X => splat(a[0]),
-                    Y => splat(a[1]),
-                    Red | Green | Blue => splat(safe_div(
-                        a[match op {
-                            Red => 0,
-                            Green => 1,
-                            _ => 2,
-                        }],
-                        a[3],
-                    )),
-                    Alpha => splat(a[3]),
-                    Sin => a.map(f32::sin),
-                    Cos => a.map(f32::cos),
-                    Tan => a.map(f32::tan),
-                    Abs => a.map(f32::abs),
-                    Floor => a.map(f32::floor),
-                    Ceil => a.map(f32::ceil),
-                    Fract => a.map(|v| v - v.floor()),
-                    Sqrt => a.map(|v| v.max(0.).sqrt()),
-                    Exp => a.map(|v| v.min(80.).exp()),
-                    Log => a.map(|v| if v > 0. { v.ln() } else { 0. }),
-                    Pow => a.map(|v| finite(v.powf(b[0]))),
-                    Min => std::array::from_fn(|i| a[i].min(b[i])),
-                    Max => std::array::from_fn(|i| a[i].max(b[i])),
-                    Clamp => a.map(|v| v.clamp(b[0].min(c[0]), b[0].max(c[0]))),
-                    Step => splat(if b[0] >= a[0] { 1. } else { 0. }),
-                    Smoothstep => splat(smooth(a[0], b[0], c[0])),
-                    Mix => mix(a, b, c[0]),
-                    Select => {
-                        if a[0] != 0. {
-                            b
-                        } else {
-                            c
-                        }
-                    }
-                    Length => splat(len(a)),
-                    Dot => splat(a[0] * b[0] + a[1] * b[1]),
-                    Normalize => {
-                        let l = len(a);
-                        [safe_div(a[0], l), safe_div(a[1], l), 0., 0.]
-                    }
-                    Atan2 => splat(a[0].atan2(b[0])),
-                    Hash => {
-                        let seed = (self.seed ^ (b[0] as i32 as u32))
-                            .wrapping_add(c[0] as i32 as u32)
-                            ^ (at(3)[0] as i32 as u32).wrapping_mul(0x68bc21eb);
-                        splat(hash2(
-                            a[0].floor().clamp(-2147483648., 2147483520.) as i32,
-                            a[1].floor().clamp(-2147483648., 2147483520.) as i32,
-                            seed,
-                        ))
-                    }
-                    Over => {
-                        let aa = a[3].clamp(0., 1.);
-                        [
-                            a[0] + b[0] * (1. - aa),
-                            a[1] + b[1] * (1. - aa),
-                            a[2] + b[2] * (1. - aa),
-                            aa + b[3].clamp(0., 1.) * (1. - aa),
-                        ]
-                    }
-                    Mask | Opacity => a.map(|v| v * b[0].clamp(0., 1.)),
-                    SampleAt | Footprint | PixelSize => unreachable!(),
-                }
-            }
-        };
-        result.map(finite)
-    }
-}
+mod evaluation;
+/// CPU evaluator with f64 intermediate arithmetic for precise camera rendering.
+/// Source constants and parameter values retain their compiled f32 values.
+pub use evaluation::double::Evaluator as Evaluator64;
+pub use evaluation::single::{Evaluator, hash, hash2};

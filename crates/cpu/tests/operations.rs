@@ -50,6 +50,20 @@ fn every_registered_operation_executes_on_cpu() {
             ..Default::default()
         };
         let pixels = render(&program, &options).unwrap_or_else(|e| panic!("{}: {e}", op.name));
+        let deep = RenderOptions {
+            precise_viewport: Some(program.viewbox.map(f64::from)),
+            ..options.clone()
+        };
+        let precise = render(&program, &deep).unwrap();
+        assert!(
+            pixels
+                .iter()
+                .flatten()
+                .zip(precise.iter().flatten())
+                .all(|(a, b)| (a - b).abs() < 1e-5),
+            "f64 operation {}",
+            op.name
+        );
         assert_eq!(pixels.len(), 16, "{}", op.name);
         assert!(
             pixels.iter().flatten().all(|v| v.is_finite()),

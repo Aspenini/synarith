@@ -332,7 +332,11 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, events: mpsc::Sender<WorkerEvent>
                     return Err("render cancelled: source changed".into());
                 }
                 let start = Instant::now();
-                let pixels = doc.renderer.render(&request.options)?;
+                // Previews have a bounded canvas-sized region. Dispatch it once;
+                // still exports retain the library's streaming strip path.
+                let pixels = doc
+                    .renderer
+                    .render_region(&request.options, request.options.full_region())?;
                 let warnings = doc.renderer.take_warnings();
                 if !warnings.is_empty() {
                     doc.notice = warnings.join("; ");

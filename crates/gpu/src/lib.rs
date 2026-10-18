@@ -206,6 +206,9 @@ impl GpuRenderer {
         region: Region,
     ) -> Result<Vec<Pixel>, String> {
         options.validate(program, region)?;
+        if options.precise_viewport.is_some() {
+            return Err("GPU execution does not support f64 cameras; use Auto or CPU".into());
+        }
         if compiled.output != options.output {
             return Err("GPU program output does not match render options".into());
         }

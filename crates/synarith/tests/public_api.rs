@@ -16,6 +16,25 @@ fn gpu_selection_overrides_outputs_and_auto_fallback() {
         }
     };
     assert_eq!(renderer.backend(), Backend::Gpu);
+    let deep = RenderOptions {
+        width: 8,
+        height: 8,
+        precise_viewport: Some([0.5, 0.5, 1e-10, 1e-10]),
+        ..Default::default()
+    };
+    assert!(renderer.render(&deep).unwrap_err().contains("CPU f64"));
+    let mut camera_auto = Renderer::with_backend(load(source).unwrap(), Backend::Auto).unwrap();
+    camera_auto.render(&deep).unwrap();
+    assert_eq!(camera_auto.backend(), Backend::Cpu);
+    assert!(camera_auto.backend_description().contains("f64"));
+    camera_auto
+        .render(&RenderOptions {
+            width: 8,
+            height: 8,
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(camera_auto.backend(), Backend::Gpu);
     let mut options = RenderOptions {
         width: 8,
         height: 6,

@@ -30,7 +30,8 @@
 //! directly through the Rust library, watches source changes, plays time expressions
 //! continuously, and supports smooth mathematical zoom/pan and still exports.
 //! Scroll/pinch to zoom, drag to pan, Space to play/pause, R to restart, 0 to fit.
-//! Camera navigation uses f64; evaluated language coordinates retain f32 precision.
+//! Deep views automatically use CPU f64 arithmetic in Auto mode; GPU mode stays f32.
+//! Compiled constants and parameter values retain their original f32 representation.
 //!
 //! Examples:
 //!

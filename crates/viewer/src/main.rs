@@ -9,9 +9,6 @@ use std::{
 use synarith::{Backend, ImageFormat, RenderOptions, Type, Value, parameter_value};
 use synarith_viewer::{Camera, DocumentInfo, FrameRequest, LiveWorker, Timeline, WorkerEvent};
 
-const KOCH: &str = include_str!("../../../examples/koch-snowflake.syar");
-const DRAGON: &str = include_str!("../../../examples/dragon-curve.syar");
-const SPACE: &str = include_str!("../../../examples/deep-space.syar");
 const FORMATS: [(&str, ImageFormat); 5] = [
     ("PNG", ImageFormat::Png),
     ("JPEG", ImageFormat::Jpeg),
@@ -25,6 +22,7 @@ struct Smoke {
     export: Option<PathBuf>,
     phase: u8,
     initial_width: f32,
+    zoom: f64,
     started: Instant,
     outcome: Arc<Mutex<Result<(), String>>>,
 }
@@ -44,6 +42,8 @@ struct Viewer {
     dirty: bool,
     exporting: bool,
     image: Option<egui::TextureHandle>,
+    image_view: Option<[f64; 4]>,
+    navigating: bool,
     last_rgba: Option<(u32, u32, Vec<u8>)>,
     frame_time: f32,
     latency: f64,
@@ -64,18 +64,17 @@ struct Viewer {
 }
 impl Viewer {
     fn new(file: Option<PathBuf>, smoke: Option<Smoke>, paused: bool) -> Self {
+        let has_file = file.is_some();
         let worker = LiveWorker::new();
         if let Some(path) = file {
             worker.open(path);
-        } else {
-            worker.open_source("Koch snowflake.syar".into(), Arc::from(KOCH));
         }
         Self {
             worker,
             document: None,
             camera: Camera::new([0., 0., 1., 1.]),
             timeline: Timeline {
-                playing: !paused,
+                playing: !paused && has_file,
                 ..Default::default()
             },
             live: !paused,
@@ -89,11 +88,13 @@ impl Viewer {
             dirty: true,
             exporting: false,
             image: None,
+            image_view: None,
+            navigating: false,
             last_rgba: None,
             frame_time: 0.,
             latency: 0.,
             backend_text: "Preparing renderer".into(),
-            message: "Opening source…".into(),
+            message: "Open or drop a .syar source file to begin".into(),
             error: false,
             canvas: [0., 0., 800., 600.],
             last_tick: Instant::now(),
@@ -117,6 +118,11 @@ impl Viewer {
     }
     fn request(&self, width: u32, height: u32) -> Option<FrameRequest> {
         let doc = self.document.as_ref()?;
+        let samples = if self.timeline.playing || self.navigating {
+            1
+        } else {
+            self.samples
+        };
         Some(FrameRequest {
             revision: self.revision,
             generation: doc.generation,
@@ -125,11 +131,20 @@ impl Viewer {
                 height,
                 time: self.timeline.time as f32,
                 viewport: Some(self.camera.viewport([self.canvas[2], self.canvas[3]])),
-                samples: if self.timeline.playing {
-                    1
-                } else {
-                    self.samples
-                },
+                precise_viewport: self
+                    .camera
+                    .precision_for(
+                        [self.canvas[2], self.canvas[3]],
+                        [
+                            width.saturating_mul(samples),
+                            height.saturating_mul(samples),
+                        ],
+                    )
+                    .then(|| {
+                        self.camera
+                            .precise_viewport([self.canvas[2], self.canvas[3]])
+                    }),
+                samples,
                 output: self.output.clone(),
                 parameters: self.parameters.clone(),
                 ..Default::default()
@@ -142,7 +157,8 @@ impl Viewer {
         self.last_tick = now;
         self.timeline.advance(dt);
         let moving = self.camera.advance(dt);
-        self.dirty |= moving || self.timeline.playing;
+        self.dirty |= moving || (self.navigating && !moving) || self.timeline.playing;
+        self.navigating = moving;
         let mut changed = moving;
         while let Some(event) = self.worker.poll() {
             changed = true;
@@ -206,12 +222,19 @@ impl Viewer {
                     {
                         continue;
                     }
+                    self.image_view = frame
+                        .request
+                        .options
+                        .precise_viewport
+                        .or_else(|| frame.request.options.viewport.map(|v| v.map(f64::from)));
                     self.frame_time = frame.request.options.time;
                     self.latency = frame.elapsed.as_secs_f64();
                     self.backend_text = frame.backend;
                     let w = frame.request.options.width;
                     let h = frame.request.options.height;
-                    self.last_rgba = Some((w, h, frame.rgba.clone()));
+                    if self.smoke.is_some() {
+                        self.last_rgba = Some((w, h, frame.rgba.clone()));
+                    }
                     let pixels = egui::ColorImage::from_rgba_unmultiplied(
                         [w as usize, h as usize],
                         &frame.rgba,
@@ -225,7 +248,7 @@ impl Viewer {
                             egui::TextureOptions::LINEAR,
                         ));
                     }
-                    if self.timeline.playing {
+                    if self.timeline.playing || self.navigating {
                         if self.latency > 0.08 {
                             self.adaptive_cap = ((w.max(h) as f64 * (0.045 / self.latency).sqrt())
                                 as u32)
@@ -275,11 +298,12 @@ impl Viewer {
             self.finish_smoke(Err("Viewer workflow timed out".into()), ctx);
         }
         if self.dirty && !self.in_flight && !self.exporting && self.document.is_some() {
-            let cap = if self.timeline.playing {
+            let cap = if self.timeline.playing || self.navigating {
                 self.adaptive_cap.min(CAPS[self.quality])
             } else {
                 CAPS[self.quality]
             };
+            let cap = if self.navigating { cap.min(512) } else { cap };
             let scale = (f64::from(cap) / self.canvas[2].max(self.canvas[3])).min(1.0);
             let w = (self.canvas[2] * scale).round().max(1.) as u32;
             let h = (self.canvas[3] * scale).round().max(1.) as u32;
@@ -308,8 +332,11 @@ impl Viewer {
                 smoke.phase = 2;
                 self.live = false;
                 self.timeline.playing = false;
-                self.camera
-                    .zoom_at(2.0f64.ln(), [0.5, 0.5], [self.canvas[2], self.canvas[3]]);
+                self.camera.zoom_at(
+                    smoke.zoom.ln(),
+                    [0.5, 0.5],
+                    [self.canvas[2], self.canvas[3]],
+                );
                 self.camera.advance(1.0);
                 self.invalidate();
             }
@@ -389,6 +416,18 @@ impl Viewer {
         if let Some(path) = dialog.save_file() {
             let mut request = self.request(self.export_width, self.export_height).unwrap();
             request.options.samples = self.samples;
+            if self.camera.precision_for(
+                [self.canvas[2], self.canvas[3]],
+                [
+                    self.export_width.saturating_mul(self.samples),
+                    self.export_height.saturating_mul(self.samples),
+                ],
+            ) {
+                request.options.precise_viewport = Some(
+                    self.camera
+                        .precise_viewport([self.canvas[2], self.canvas[3]]),
+                );
+            }
             self.worker
                 .export(path, FORMATS[self.format].1, self.jpeg_quality, request);
             self.exporting = true;
@@ -407,6 +446,9 @@ impl Viewer {
         self.invalidate();
     }
     fn zoom(&mut self, amount: f64, anchor: [f64; 2]) {
+        if !self.navigating {
+            self.invalidate();
+        }
         self.camera
             .zoom_at(amount, anchor, [self.canvas[2], self.canvas[3]]);
     }
@@ -417,13 +459,6 @@ impl Viewer {
                 ui.separator();
                 if ui.button("Open source…").clicked() {
                     self.open_dialog();
-                }
-                for (label, source) in [("Koch", KOCH), ("Dragon", DRAGON), ("Space", SPACE)] {
-                    if ui.button(label).clicked() {
-                        self.invalidate();
-                        self.worker
-                            .open_source(format!("{label}.syar").into(), Arc::from(source));
-                    }
                 }
                 ui.separator();
                 if ui.button("Fit").clicked() {
@@ -436,7 +471,7 @@ impl Viewer {
                 if ui.button("+").clicked() {
                     self.zoom(0.5, [0.5, 0.5]);
                 }
-                ui.label(format!("{:.2}×", self.camera.magnification()));
+                ui.label(format!("{:.3e}×", self.camera.magnification()));
                 ui.checkbox(&mut self.source_panel, "Source");
             });
         });
@@ -488,7 +523,7 @@ impl Viewer {
             if self.camera.precision_limited {
                 ui.colored_label(
                     egui::Color32::YELLOW,
-                    "Coordinate precision limit reached (f32 evaluation)",
+                    "Reached the f64 coordinate precision limit",
                 );
             }
             ui.colored_label(
@@ -601,23 +636,62 @@ Space: play/pause · R: restart
                     self.dirty = true;
                 }
                 if let Some(texture) = &self.image {
-                    ui.painter().image(
-                        texture.id(),
-                        rect,
-                        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1., 1.)),
-                        egui::Color32::WHITE,
-                    );
+                    let current = self
+                        .camera
+                        .precise_viewport([self.canvas[2], self.canvas[3]]);
+                    let previous = self.image_view.unwrap_or(current);
+                    // Reproject the latest frame while a new procedural sample is
+                    // rendering. Clip coordinates/UVs to avoid enormous GPU quads.
+                    let offset = [
+                        (current[0] - previous[0]) / previous[2],
+                        (current[1] - previous[1]) / previous[3],
+                    ];
+                    let span = [current[2] / previous[2], current[3] / previous[3]];
+                    let uv_min = [offset[0].clamp(0., 1.), offset[1].clamp(0., 1.)];
+                    let uv_max = [
+                        (offset[0] + span[0]).clamp(0., 1.),
+                        (offset[1] + span[1]).clamp(0., 1.),
+                    ];
+                    if uv_max[0] > uv_min[0] && uv_max[1] > uv_min[1] {
+                        let start = egui::pos2(
+                            rect.left() + ((uv_min[0] - offset[0]) / span[0]) as f32 * rect.width(),
+                            rect.top() + ((uv_min[1] - offset[1]) / span[1]) as f32 * rect.height(),
+                        );
+                        let end = egui::pos2(
+                            rect.left() + ((uv_max[0] - offset[0]) / span[0]) as f32 * rect.width(),
+                            rect.top() + ((uv_max[1] - offset[1]) / span[1]) as f32 * rect.height(),
+                        );
+                        ui.painter().image(
+                            texture.id(),
+                            egui::Rect::from_min_max(start, end),
+                            egui::Rect::from_min_max(
+                                egui::pos2(uv_min[0] as f32, uv_min[1] as f32),
+                                egui::pos2(uv_max[0] as f32, uv_max[1] as f32),
+                            ),
+                            egui::Color32::WHITE,
+                        );
+                    }
                 } else {
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
-                        "Preparing mathematical image…",
+                        if self.document.is_none() {
+                            "Open or drop a .syar file"
+                        } else {
+                            "Preparing mathematical image…"
+                        },
                         egui::FontId::proportional(20.),
                         egui::Color32::GRAY,
                     );
+                    if self.document.is_none() && response.clicked() {
+                        self.open_dialog();
+                    }
                 }
                 if response.dragged() {
                     let d = ui.input(|i| i.pointer.delta());
+                    if !self.navigating && d != egui::Vec2::ZERO {
+                        self.invalidate();
+                    }
                     self.camera.pan(
                         [f64::from(d.x), f64::from(d.y)],
                         [self.canvas[2], self.canvas[3]],
@@ -685,7 +759,13 @@ impl eframe::App for Viewer {
             self.open_path(path);
         }
         self.controls(ctx);
-        ctx.request_repaint_after(Duration::from_millis(16));
+        ctx.request_repaint_after(Duration::from_millis(
+            if self.timeline.playing || self.navigating || self.in_flight || self.exporting {
+                16
+            } else {
+                100
+            },
+        ));
     }
 }
 fn run() -> Result<(), String> {
@@ -694,6 +774,7 @@ fn run() -> Result<(), String> {
     let mut snapshot = None;
     let mut export = None;
     let mut paused = false;
+    let mut smoke_zoom = 2.0f64;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
         match arg.to_str() {
@@ -713,10 +794,19 @@ fn run() -> Result<(), String> {
                     args.next().ok_or("--export-test needs a PNG path")?,
                 ))
             }
+            Some("--smoke-zoom") => {
+                smoke_zoom = args
+                    .next()
+                    .and_then(|v| v.to_str().and_then(|v| v.parse().ok()))
+                    .ok_or("--smoke-zoom needs a magnification")?;
+                if !smoke_zoom.is_finite() || smoke_zoom < 1.5 {
+                    return Err("Smoke zoom must be finite and at least 1.5".into());
+                }
+            }
             Some("--paused") => paused = true,
             Some("--help") => {
                 println!(
-                    "syar-view [FILE.syar] [--paused]\nEgui live rendering; watches source edits. Scroll zoom, drag pan, Space play/pause, R restart, 0 fit.\nDeveloper workflow: --smoke-test FILE --snapshot CANVAS.png --export-test OUTPUT.png"
+                    "syar-view [FILE.syar] [--paused]\nEgui live rendering; watches source edits. Scroll zoom, drag pan, Space play/pause, R restart, 0 fit.\nDeveloper workflow: --smoke-test FILE --snapshot CANVAS.png --export-test OUTPUT.png [--smoke-zoom FACTOR]"
                 );
                 return Ok(());
             }
@@ -747,6 +837,7 @@ fn run() -> Result<(), String> {
                 export,
                 phase: 0,
                 initial_width: 0.,
+                zoom: smoke_zoom,
                 started: Instant::now(),
                 outcome,
             });

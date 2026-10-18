@@ -59,7 +59,19 @@ fn playback_seek_and_cursor_anchored_camera_are_independent() {
     let size = [800., 600.];
     let anchor = [0.25, 0.75];
     let old = camera.viewport(size);
+    let old_precise = camera.precise_viewport(size);
     camera.zoom_at(2.0f64.ln(), anchor, size);
+    camera.advance(0.01);
+    let intermediate = camera.precise_viewport(size);
+    for i in 0..2 {
+        assert!(
+            (old_precise[i] + anchor[i] * old_precise[i + 2]
+                - intermediate[i]
+                - anchor[i] * intermediate[i + 2])
+                .abs()
+                < 1e-12
+        );
+    }
     camera.advance(2.);
     let new = camera.viewport(size);
     for i in 0..2 {
@@ -75,6 +87,36 @@ fn playback_seek_and_cursor_anchored_camera_are_independent() {
     assert!(camera.precision_limited);
     camera.reset();
     assert_eq!(camera.viewport(size), old);
+}
+
+#[test]
+fn deep_navigation_switches_precision_and_pans_below_the_old_epsilon() {
+    let mut camera = Camera::new([0., 0., 1., 1.]);
+    let size = [800., 800.];
+    assert!(!camera.requires_precision(size));
+    camera.zoom_at(1e10f64.ln(), [0.5, 0.5], size);
+    camera.advance(2.);
+    assert!(!camera.precision_limited);
+    assert!(camera.requires_precision(size));
+    let before = camera.precise_viewport(size);
+    assert!((before[2] - 1e-10).abs() < 1e-19);
+    camera.pan([10., 0.], size);
+    camera.advance(2.);
+    let after = camera.precise_viewport(size);
+    assert!(after[0] < before[0]);
+    assert!((after[0] - before[0] + 10. * before[2] / size[0]).abs() < 1e-16);
+    camera.zoom_at(-1e10f64.ln(), [0.5, 0.5], size);
+    camera.advance(2.);
+    assert!(!camera.requires_precision(size));
+    // The former fixed logarithmic cap was 80. Around zero, f64 can represent
+    // much smaller fields; arbitrary algorithm names have no role in navigation.
+    let mut origin = Camera::new([-0.5, -0.5, 1., 1.]);
+    origin.zoom_at(100., [0.5, 0.5], size);
+    origin.advance(2.);
+    assert!(!origin.precision_limited);
+    assert!(origin.magnification() > 1e40);
+    assert!(origin.precise_viewport(size)[2] < 1e-40);
+    assert!(origin.requires_precision(size));
 }
 
 #[test]
@@ -120,6 +162,7 @@ fn worker_plays_reloads_retains_valid_source_cancels_and_exports() {
         export.options.width = 37;
         export.options.height = 19;
         export.options.viewport = Some([0.2, 0.3, 0.5, 0.5]);
+        export.options.precise_viewport = Some([0.5, 0.5, 1e-10, 1e-10]);
         worker.export(destination.clone(), format, 91, export);
         let result = event(&worker);
         assert!(

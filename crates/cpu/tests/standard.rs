@@ -102,6 +102,15 @@ fn every_public_source_library_algorithm_renders() {
         };
         let actual = render(&program, &options).unwrap();
         assert!(actual.iter().flatten().all(|v| v.is_finite()), "{name}");
+        let deep = RenderOptions {
+            precise_viewport: Some(program.viewbox.map(f64::from)),
+            ..options.clone()
+        };
+        let precise = render(&program, &deep).unwrap();
+        assert!(
+            precise.iter().flatten().all(|v| v.is_finite()),
+            "f64 {name}"
+        );
         let standalone = compile(&parse(&expand_standard_library(&doc).unwrap()).unwrap()).unwrap();
         assert_eq!(actual, render(&standalone, &options).unwrap(), "{name}");
     }

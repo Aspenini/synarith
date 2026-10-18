@@ -121,6 +121,7 @@ impl std::str::FromStr for Backend {
 pub struct Renderer {
     program: Program,
     requested: Backend,
+    precise: bool,
     warnings: Vec<String>,
     cpu: std::collections::BTreeMap<String, CpuProgram>,
     #[cfg(feature = "gpu")]
@@ -137,6 +138,7 @@ impl Renderer {
         Self {
             program,
             requested: Backend::Cpu,
+            precise: false,
             warnings: Vec::new(),
             cpu: Default::default(),
             #[cfg(feature = "gpu")]
@@ -178,6 +180,9 @@ impl Renderer {
     }
     /// Return the current executing backend, always CPU or GPU rather than Auto.
     pub fn backend(&self) -> Backend {
+        if self.precise {
+            return Backend::Cpu;
+        }
         #[cfg(feature = "gpu")]
         if self.gpu.is_some() {
             return Backend::Gpu;
@@ -186,6 +191,9 @@ impl Renderer {
     }
     /// Describe the current backend, including the GPU adapter name when applicable.
     pub fn backend_description(&self) -> String {
+        if self.precise {
+            return "CPU · f64 deep camera".into();
+        }
         #[cfg(feature = "gpu")]
         if let Some(gpu) = &self.gpu {
             return format!("GPU: {}", gpu.adapter_name);
@@ -231,8 +239,12 @@ impl Renderer {
         if options.cancellation.is_cancelled() {
             return Err("render cancelled".into());
         }
+        if options.precise_viewport.is_some() && self.requested == Backend::Gpu {
+            return Err("Deep cameras require CPU f64 arithmetic; select Auto or CPU".into());
+        }
+        self.precise = options.precise_viewport.is_some();
         #[cfg(feature = "gpu")]
-        if self.gpu.is_some() {
+        if !self.precise && self.gpu.is_some() {
             match self.gpu_region(options, region) {
                 Ok(pixels) => return Ok(pixels),
                 Err(reason) => {
