@@ -28,16 +28,110 @@
 //! per linear premultiplied RGBA component and tile agreement within 0.00001.
 //! Set `SYAR_REQUIRE_GPU=1` when running tests to require actual GPU execution;
 //! without it, unavailable adapters produce an explicit skip message.
+//!
+//! # Hosting the shaders yourself
+//!
+//! The shader generator and buffer layout need no graphics library, so an
+//! application that already owns a GPU device (a game engine, for example) can
+//! dispatch Synarith fields itself. Disable default features to omit wgpu, then:
+//!
+//! 1. [`wgsl`] produces a compute shader for one output, entry point `main`,
+//!    with workgroups of [`WORKGROUP_SIZE`]×[`WORKGROUP_SIZE`] threads.
+//! 2. Bind group 0 holds three buffers: binding 0 is a uniform buffer with the
+//!    80 bytes from [`uniform_bytes`]; binding 1 is a read-only storage buffer of
+//!    `vec4<f32>` from [`parameter_data`]; binding 2 is a read-write storage buffer
+//!    of `region.width * region.height` `vec4<f32>` pixels.
+//! 3. Dispatch `ceil(width / 8) × ceil(height / 8)` workgroups for the region. Pixels
+//!    are row-major, linear, premultiplied RGBA, exactly as [`synarith_cpu::Pixel`].
+//!
+//! Render large images in regions (strips) so each output buffer stays within the
+//! device's storage-binding limit; full-image coordinates keep regions aligned.
+//! The `device` feature (on by default) adds [`GpuRenderer`], which does all of this
+//! through its own wgpu device.
 #![deny(missing_docs)]
 mod shader;
 use synarith_core::Program;
-use synarith_cpu::{Mapping, Pixel, Region, RenderOptions};
+#[cfg(feature = "device")]
+use synarith_cpu::Pixel;
+use synarith_cpu::{Mapping, Region, RenderOptions};
+#[cfg(feature = "device")]
 use wgpu::util::DeviceExt;
+
+/// Edge length of the square compute workgroups used by [`wgsl`] shaders.
+pub const WORKGROUP_SIZE: u32 = 8;
+
+/// Generate the WGSL compute shader for one named output of a compiled graph.
+///
+/// The shader needs no device features beyond baseline WebGPU compute. See the
+/// [crate documentation](crate#hosting-the-shaders-yourself) for its bindings.
+///
+/// # Errors
+/// Returns unknown-output or execution-plan errors.
+pub fn wgsl(program: &Program, output: &str) -> Result<String, String> {
+    shader::generate(program, output)
+}
+
+/// The 80-byte uniform block (binding 0) for rendering `region` of an image.
+///
+/// Encodes the image size, region origin and size, view mapping, sampling
+/// quality, seed, and time, little-endian, in the shader's uniform layout. Call
+/// once per region. Options are not validated here; use
+/// [`RenderOptions::validate`] first. `precise_viewport` is ignored: shaders
+/// evaluate in f32.
+pub fn uniform_bytes(program: &Program, options: &RenderOptions, region: Region) -> [u8; 80] {
+    let viewbox = options.viewport.unwrap_or(program.viewbox);
+    let mapping = Mapping::new(viewbox, options.width, options.height);
+    let words: [u32; 20] = [
+        options.width,
+        options.height,
+        region.x,
+        region.y,
+        mapping.origin[0].to_bits(),
+        mapping.origin[1].to_bits(),
+        mapping.units_per_pixel.to_bits(),
+        0,
+        viewbox[0].to_bits(),
+        viewbox[1].to_bits(),
+        viewbox[2].to_bits(),
+        viewbox[3].to_bits(),
+        region.width,
+        region.height,
+        options.samples,
+        options.seed.unwrap_or(program.seed),
+        options.time.to_bits(),
+        0,
+        0,
+        0,
+    ];
+    let mut bytes = [0; 80];
+    for (i, word) in words.iter().enumerate() {
+        bytes[i * 4..i * 4 + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    bytes
+}
+
+/// Parameter components for the storage buffer at binding 1, in declaration order.
+///
+/// Empty `options.parameters` selects the document defaults. Always returns at
+/// least one element, because storage buffers cannot be empty.
+pub fn parameter_data(program: &Program, options: &RenderOptions) -> Vec<[f32; 4]> {
+    let values = if options.parameters.is_empty() {
+        program.defaults()
+    } else {
+        options.parameters.clone()
+    };
+    let mut parameters = values.iter().map(|v| v.data).collect::<Vec<_>>();
+    if parameters.is_empty() {
+        parameters.push([0.; 4]);
+    }
+    parameters
+}
 
 /// Native compute device and synchronous render/readback executor.
 ///
 /// Calls on one renderer are serialized so device error scopes cannot
 /// interleave. No window or surface is needed.
+#[cfg(feature = "device")]
 pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -49,19 +143,12 @@ pub struct GpuRenderer {
 ///
 /// Keep it paired with the same [`Program`] and [`GpuRenderer`] used to compile
 /// it. Parameter overrides, time, seed, and sampling options may change.
+#[cfg(feature = "device")]
 pub struct GpuProgram {
     pipeline: wgpu::ComputePipeline,
     output: String,
 }
-#[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct Settings {
-    size: [u32; 4],
-    geom: [f32; 4],
-    viewbox: [f32; 4],
-    state: [u32; 4],
-    clock: [f32; 4],
-}
+#[cfg(feature = "device")]
 impl GpuRenderer {
     /// Select a native adapter and request a compute device with baseline limits.
     ///
@@ -133,7 +220,7 @@ impl GpuRenderer {
     /// # Errors
     /// Returns unknown-output, shader validation, pipeline, or device-resource errors.
     pub fn compile(&self, program: &Program, output: &str) -> Result<GpuProgram, String> {
-        let source = shader::generate(program, output)?;
+        let source = wgsl(program, output)?;
         self.scoped(|| {
             let module = self
                 .device
@@ -217,7 +304,10 @@ impl GpuRenderer {
         }
         let bytes = u64::from(region.width) * u64::from(region.height) * 16;
         let limits = self.device.limits();
-        let groups = [region.width.div_ceil(8), region.height.div_ceil(8)];
+        let groups = [
+            region.width.div_ceil(WORKGROUP_SIZE),
+            region.height.div_ceil(WORKGROUP_SIZE),
+        ];
         if bytes > u64::from(limits.max_storage_buffer_binding_size)
             || bytes > limits.max_buffer_size
             || groups
@@ -226,37 +316,8 @@ impl GpuRenderer {
         {
             return Err("region exceeds GPU limits; render smaller tiles".into());
         }
-        let mapping = Mapping::new(
-            options.viewport.unwrap_or(program.viewbox),
-            options.width,
-            options.height,
-        );
-        let settings = Settings {
-            size: [options.width, options.height, region.x, region.y],
-            geom: [
-                mapping.origin[0],
-                mapping.origin[1],
-                mapping.units_per_pixel,
-                0.,
-            ],
-            viewbox: options.viewport.unwrap_or(program.viewbox),
-            state: [
-                region.width,
-                region.height,
-                options.samples,
-                options.seed.unwrap_or(program.seed),
-            ],
-            clock: [options.time, 0., 0., 0.],
-        };
-        let values = if options.parameters.is_empty() {
-            program.defaults()
-        } else {
-            options.parameters.clone()
-        };
-        let mut parameters = values.iter().map(|v| v.data).collect::<Vec<_>>();
-        if parameters.is_empty() {
-            parameters.push([0.; 4]);
-        }
+        let settings = uniform_bytes(program, options, region);
+        let parameters = parameter_data(program, options);
         if parameters.len() as u64 * 16 > u64::from(limits.max_storage_buffer_binding_size) {
             return Err("parameters exceed GPU buffer limits".into());
         }
@@ -265,7 +326,7 @@ impl GpuRenderer {
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: None,
-                    contents: bytemuck::bytes_of(&settings),
+                    contents: &settings,
                     usage: wgpu::BufferUsages::UNIFORM,
                 });
             let params = self

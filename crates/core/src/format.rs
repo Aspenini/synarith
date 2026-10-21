@@ -281,6 +281,9 @@
 //!   length/dot/normalization.
 //! - **Noise:** quintic-interpolated value noise, gradient noise, cellular distance, fractal noise,
 //!   turbulence, ridged noise, and integral-period lattice noise. Fractals use 1–12 octaves.
+//!   `periodic_fbm`, `periodic_turbulence`, and `periodic_ridged` repeat every `period`
+//!   units (whole lattice cells) through all octaves, with lacunarity fixed at 2, for
+//!   seamless tiles: sample `p * period` to repeat once per unit square.
 //!   Cellular uses a bounded 3×3 neighborhood. `periodic_noise` takes positive integral lattice
 //!   periods, rounded and clamped to at least one by the library.
 //! - **Gradients:** linear projection, radial distance, angular position, and a four-stop color

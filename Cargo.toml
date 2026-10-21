@@ -11,7 +11,7 @@ rust-version = "1.89"
 synarith-stdlib = { path = "crates/stdlib" }
 synarith-core = { path = "crates/core" }
 synarith-cpu = { path = "crates/cpu" }
-synarith-gpu = { path = "crates/gpu" }
+synarith-gpu = { path = "crates/gpu", default-features = false }
 synarith = { path = "crates/synarith" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -22,7 +22,7 @@ clap = { version = "4.5", features = ["derive"] }
 wgpu = { version = "24", default-features = false, features = ["wgsl", "dx12", "metal"] }
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
-image = { version = "=0.25.9", default-features = false, features = ["jpeg", "bmp", "tga", "pnm"] }
+image = { version = "0.25.9", default-features = false, features = ["jpeg", "bmp", "tga", "pnm"] }
 
 [profile.release]
 lto = "thin"

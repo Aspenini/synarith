@@ -5,9 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[features]
+default = ["device"]
+# GpuRenderer: Synarith's own wgpu device, pipelines and readback. Without it,
+# the crate only generates shaders and buffer layouts for a host's own device.
+device = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
 [dependencies]
 synarith-core.workspace = true
 synarith-cpu.workspace = true
-wgpu.workspace = true
-pollster.workspace = true
-bytemuck.workspace = true
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }

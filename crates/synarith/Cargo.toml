@@ -7,7 +7,9 @@ license.workspace = true
 
 [features]
 default = ["gpu"]
-gpu = ["dep:synarith-gpu"]
+gpu = ["wgsl", "synarith-gpu/device"]
+# WGSL shader generation and buffer layouts only, for hosts with their own GPU device.
+wgsl = ["dep:synarith-gpu"]
 
 [dependencies]
 synarith-core.workspace = true

@@ -152,6 +152,33 @@ fn seamless_noise_and_periodic_animation() {
     let a = sample(&p, "main", [0.3, 0.7], 0., &[], None, 0.).unwrap();
     let b = sample(&p, "main", [4.3, 4.7], 0., &[], None, 0.).unwrap();
     assert!((a.data[0] - b.data[0]).abs() < 1e-6);
+    // Fractal variants repeat on the same period through every octave.
+    for name in ["periodic_fbm", "periodic_turbulence", "periodic_ridged"] {
+        let p = program(&format!(
+            "output main=rgba({name}(p,vec2(3,5),octaves:7,seed:9),0,0);"
+        ));
+        let at = |q: [f32; 2]| sample(&p, "main", q, 0., &[], None, 0.).unwrap().data[0];
+        for q in [[0.3, 0.7], [1.9, 4.2], [2.6, 0.1]] {
+            let base = at(q);
+            assert!(
+                (base - at([q[0] + 3.0, q[1]])).abs() < 1e-5,
+                "{name} x period"
+            );
+            assert!(
+                (base - at([q[0], q[1] + 5.0])).abs() < 1e-5,
+                "{name} y period"
+            );
+            assert!(
+                (base - at([q[0] - 6.0, q[1] - 10.0])).abs() < 1e-5,
+                "{name} negative"
+            );
+        }
+        assert_ne!(
+            at([0.3, 0.7]),
+            at([1.3, 0.7]),
+            "{name} varies within a period"
+        );
+    }
     let p = program("output main=rgba(pulse(loop(t,4.0)),0,0);");
     assert_eq!(
         sample(&p, "main", [0., 0.], 0., &[], None, 0.).unwrap(),

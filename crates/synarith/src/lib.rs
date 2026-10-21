@@ -37,6 +37,11 @@
 //! `default-features = false` on this dependency for a CPU-only library. The API
 //! still accepts Auto with a visible fallback reason and rejects required GPU.
 //!
+//! Applications that already own a GPU device can enable only the `wgsl` feature:
+//! it adds [`wgsl`], [`uniform_bytes`], [`parameter_data`], and [`WORKGROUP_SIZE`]
+//! without wgpu, so they can generate the compute shaders and dispatch them on
+//! their own device. The binding layout is described in `synarith_gpu`.
+//!
 //! # Rendering, color, and cancellation
 //!
 //! [`Pixel`] is linear premultiplied RGBA. [`rgba8`] converts it to straight sRGB
@@ -92,6 +97,8 @@ use std::{io::Write, path::Path};
 pub use synarith_core::*;
 #[doc(inline)]
 pub use synarith_cpu::*;
+#[cfg(feature = "wgsl")]
+pub use synarith_gpu::{WORKGROUP_SIZE, parameter_data, uniform_bytes, wgsl};
 
 /// Backend selection policy; the default policy is [`Auto`](Self::Auto).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

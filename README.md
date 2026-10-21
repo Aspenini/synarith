@@ -86,7 +86,7 @@ fn julia(q: vec2, c: vec2) -> float {
 | --- | --- |
 | Math, vectors, color construction/interpolation, alpha compositing | Core operations |
 | Deterministic lattice hash, coordinate sampling, sampling footprints | Core operations |
-| Value/gradient/cellular noise, fBm, turbulence, ridged noise | `.syar` library algorithms |
+| Value/gradient/cellular noise, fBm, turbulence, ridged noise, seamless periodic fractals | `.syar` library algorithms |
 | Circles, rectangles, polygons, stars, Bézier paths, gradients | `.syar` library algorithms |
 | Blur, normals, distortion, patterns, glows, blend modes | `.syar` library algorithms |
 | Mandelbrot, Julia, Barnsley fern, nebula integration | Functions in example documents |
