@@ -208,3 +208,80 @@ fn renderer_material_uses_strips_and_any_backend() {
         );
     }
 }
+
+#[cfg(feature = "wgsl")]
+#[test]
+fn host_plans_cover_the_image_within_limits() {
+    let program = load(TILES).unwrap();
+    let options = options(40);
+    let limits = HostLimits {
+        max_strip_values: 40 * 12,
+        ..Default::default()
+    };
+    let output = RenderOptions {
+        output: "material.albedo".into(),
+        ..options.clone()
+    };
+    for (plan, planes, apron) in [
+        (host_material(&program, &options, limits).unwrap(), 3, 1),
+        (host_output(&program, &output, limits).unwrap(), 1, 0),
+    ] {
+        assert!(plan.strips.len() > 1, "small budgets split the image");
+        let mut next = 0;
+        for strip in &plan.strips {
+            assert_eq!(strip.region.y, next);
+            next += strip.region.height;
+            let values = (40 + 2 * apron) * (strip.region.height + 2 * apron) * planes;
+            assert_eq!(strip.bytes, u64::from(values) * 16);
+            assert!(strip.bytes <= plan.buffer_bytes);
+        }
+        assert_eq!(next, 40);
+    }
+    let too_small = HostLimits {
+        max_storage_buffer_binding_size: 64,
+        ..Default::default()
+    };
+    assert!(host_material(&program, &options, too_small).is_err());
+}
+
+#[test]
+fn orm_packs_occlusion_roughness_and_metallic() {
+    let program = load(TILES).unwrap();
+    let options = options(8);
+    let image = render_material(&program, &options, options.full_region()).unwrap();
+    let orm = image.orm8();
+    assert_eq!(orm.len(), 8 * 8 * 4);
+    let byte = |v: f32| (v.clamp(0., 1.) * 255. + 0.5) as u8;
+    let (o, r, m) = (
+        image.scalar(Channel::Occlusion).unwrap(),
+        image.scalar(Channel::Roughness).unwrap(),
+        image.scalar(Channel::Metallic).unwrap(),
+    );
+    for i in 0..64 {
+        assert_eq!(
+            &orm[i * 4..i * 4 + 4],
+            &[byte(o[i]), byte(r[i]), byte(m[i]), 255]
+        );
+    }
+    // Missing channels leave the engine's own factor alone.
+    let plain = load("syar 1;material{albedo=rgba(1,0,0);roughness=0.5;}").unwrap();
+    let image = render_material(&plain, &options, options.full_region()).unwrap();
+    assert_eq!(&image.orm8()[..4], &[255, 128, 255, 255]);
+}
+
+#[test]
+fn mip_levels_halve_to_one_pixel_and_render_from_the_document() {
+    let levels = mip_levels(&RenderOptions {
+        width: 16,
+        height: 4,
+        ..Default::default()
+    });
+    let sizes: Vec<_> = levels.iter().map(|o| (o.width, o.height)).collect();
+    assert_eq!(sizes, [(16, 4), (8, 2), (4, 1), (2, 1), (1, 1)]);
+    let program = load(TILES).unwrap();
+    for level in mip_levels(&options(16)) {
+        let image = render_material(&program, &level, level.full_region()).unwrap();
+        let len = (level.width * level.height) as usize;
+        assert_eq!(image.rgba(Channel::Albedo).unwrap().len(), len);
+    }
+}

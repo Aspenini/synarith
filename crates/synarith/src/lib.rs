@@ -61,9 +61,13 @@
 //! height, roughness, metallic, occlusion, emissive), and `tile;` makes it repeat.
 //! [`Renderer::render_material`] renders every channel at once into
 //! [`MaterialPixels`], including a tangent-space normal derived from the height.
-//! [`Renderer::export_material`] writes them as PNGs. Applications that host the
-//! shaders themselves use [`material_wgsl`], [`material_uniform_bytes`], and
-//! [`MaterialPixels::assemble`]. See the [format guide](mod@format#materials).
+//! [`Renderer::export_material`] writes them as PNGs; [`MaterialPixels::orm8`]
+//! packs occlusion, roughness, and metallic into one glTF-style texture.
+//! [`mip_levels`] gives the options for rendering every mip level from the
+//! document itself. Applications that host the shaders on their own GPU device
+//! get a complete dispatch plan from [`host_material`] or [`host_output`], and
+//! write each strip with [`MaterialPixels::write_region`]. See the
+//! [format guide](mod@format#materials).
 //!
 //! # Architecture
 //!
@@ -109,7 +113,8 @@ pub use synarith_core::*;
 pub use synarith_cpu::*;
 #[cfg(feature = "wgsl")]
 pub use synarith_gpu::{
-    WORKGROUP_SIZE, material_uniform_bytes, material_wgsl, parameter_data, uniform_bytes, wgsl,
+    HostLimits, HostRender, HostStrip, WORKGROUP_SIZE, decode_pixels, host_material, host_output,
+    material_uniform_bytes, material_wgsl, parameter_data, uniform_bytes, wgsl,
 };
 
 /// Backend selection policy; the default policy is [`Auto`](Self::Auto).

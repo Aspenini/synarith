@@ -138,6 +138,20 @@ impl MaterialPixels {
             ChannelData::Rgba(_) => None,
         }
     }
+    /// glTF-style packed bytes: occlusion in red, roughness in green, metallic in
+    /// blue, alpha 255, linear. A missing channel is 255 (one), so an engine's own
+    /// factor for it applies unchanged; one texture serves all three slots.
+    pub fn orm8(&self) -> Vec<u8> {
+        let len = self.width as usize * self.height as usize;
+        let [o, r, m] =
+            [Channel::Occlusion, Channel::Roughness, Channel::Metallic].map(|c| self.scalar(c));
+        let byte = |v: Option<&[f32]>, i: usize| {
+            v.map_or(255, |v| (v[i].clamp(0., 1.) * 255. + 0.5) as u8)
+        };
+        (0..len)
+            .flat_map(|i| [byte(o, i), byte(r, i), byte(m, i), 255])
+            .collect()
+    }
     /// Build the channels of `region` from fused planes: crop the apron, then
     /// derive the normal from neighboring heights.
     ///
@@ -503,4 +517,23 @@ pub fn encode_rgba8(kind: OutputKind, pixels: &[Pixel]) -> Vec<u8> {
 /// Quantize one linear data pixel to RGBA8 without color encoding.
 pub fn pixel_data8(p: Pixel) -> [u8; 4] {
     p.map(|v| (v.clamp(0., 1.) * 255. + 0.5) as u8)
+}
+
+/// Render options for every mip level of an image, from full size down to one
+/// pixel, halving each axis (rounding down, at least one). Render each level
+/// from the document instead of filtering the one above: footprint-aware
+/// sampling filters it properly, and normals come from that level's heights.
+pub fn mip_levels(options: &RenderOptions) -> Vec<RenderOptions> {
+    let mut levels = vec![options.clone()];
+    let (mut width, mut height) = (options.width, options.height);
+    while width > 1 || height > 1 {
+        width = (width / 2).max(1);
+        height = (height / 2).max(1);
+        levels.push(RenderOptions {
+            width,
+            height,
+            ..options.clone()
+        });
+    }
+    levels
 }

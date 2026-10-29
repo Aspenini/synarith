@@ -390,3 +390,177 @@ material { albedo = mix(srgb("#203040"), srgb("#e0d0a0"), h); height = h * 0.01;
             .is_err()
     );
 }
+
+// Run a host plan on a device the test owns, exactly as an application would,
+// handing each strip's region and pixels to `take`.
+fn run_host_plan(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    plan: &synarith_gpu::HostRender,
+    mut take: impl FnMut(Region, Vec<Pixel>),
+) {
+    use wgpu::util::DeviceExt;
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: None,
+        source: wgpu::ShaderSource::Wgsl(plan.shader.clone().into()),
+    });
+    // An explicit layout: a shader need not use every binding.
+    let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::COMPUTE,
+        ty: wgpu::BindingType::Buffer {
+            ty,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
+    };
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: None,
+        entries: &[
+            entry(0, wgpu::BufferBindingType::Uniform),
+            entry(1, wgpu::BufferBindingType::Storage { read_only: true }),
+            entry(2, wgpu::BufferBindingType::Storage { read_only: false }),
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: None,
+        bind_group_layouts: &[&layout],
+        push_constant_ranges: &[],
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: None,
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let params = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: None,
+        contents: &plan.parameters,
+        usage: wgpu::BufferUsages::STORAGE,
+    });
+    let target = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: plan.buffer_bytes,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: plan.buffer_bytes,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    for strip in &plan.strips {
+        let uniform = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: &strip.uniform,
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: params.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: target.as_entire_binding(),
+                },
+            ],
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_compute_pass(&Default::default());
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind, &[]);
+            pass.dispatch_workgroups(strip.workgroups[0], strip.workgroups[1], 1);
+        }
+        encoder.copy_buffer_to_buffer(&target, 0, &staging, 0, strip.bytes);
+        queue.submit(Some(encoder.finish()));
+        let slice = staging.slice(0..strip.bytes);
+        slice.map_async(wgpu::MapMode::Read, |r| r.unwrap());
+        device.poll(wgpu::Maintain::Wait);
+        let pixels = synarith_gpu::decode_pixels(&slice.get_mapped_range());
+        staging.unmap();
+        take(strip.region, pixels);
+    }
+}
+
+#[test]
+fn host_plans_run_on_a_foreign_device() {
+    use synarith_gpu::{HostLimits, host_material, host_output};
+    if adapter().is_none() {
+        return;
+    }
+    let (device, queue) = pollster::block_on(async {
+        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions::default())
+            .await
+            .unwrap();
+        adapter
+            .request_device(&wgpu::DeviceDescriptor::default(), None)
+            .await
+            .unwrap()
+    });
+    let source = r##"syar 1;use std;tile;
+let h = tile_fbm(p, 5.0, octaves: 4, seed: 2);
+material { albedo = mix(srgb("#203040"), srgb("#e0d0a0"), h); height = h * 0.01; roughness = h; occlusion = 1.0 - h * 0.5; }
+"##;
+    let program = compile(&parse(source).unwrap()).unwrap();
+    let options = RenderOptions {
+        width: 24,
+        height: 20,
+        ..Default::default()
+    };
+    let limits = HostLimits {
+        max_strip_values: 24 * 9,
+        ..Default::default()
+    };
+    // Material strips written in place match a CPU render.
+    let plan = host_material(&program, &options, limits).unwrap();
+    assert!(plan.strips.len() > 1);
+    let mut image = MaterialPixels::new(program.material.as_ref().unwrap(), 24, 20);
+    run_host_plan(&device, &queue, &plan, |region, pixels| {
+        image
+            .write_region(&program, &options, region, &pixels)
+            .unwrap();
+    });
+    let expected = render_material(&program, &options, options.full_region()).unwrap();
+    for ((channel, a), (_, b)) in image.channels.iter().zip(&expected.channels) {
+        let difference = a
+            .to_pixels()
+            .iter()
+            .flatten()
+            .zip(b.to_pixels().iter().flatten())
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        assert!(difference <= 0.004, "{channel}: {difference}");
+    }
+    // A single output's strips append in row order.
+    let output = RenderOptions {
+        output: "material.albedo".into(),
+        ..options.clone()
+    };
+    let plan = host_output(&program, &output, limits).unwrap();
+    let mut pixels = Vec::new();
+    run_host_plan(&device, &queue, &plan, |_, part| pixels.extend(part));
+    let expected = render(&program, &output).unwrap();
+    assert_eq!(pixels.len(), expected.len());
+    assert!(
+        pixels
+            .iter()
+            .flatten()
+            .zip(expected.iter().flatten())
+            .all(|(a, b)| (a - b).abs() <= 0.004)
+    );
+}

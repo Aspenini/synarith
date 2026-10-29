@@ -46,10 +46,15 @@
 //!
 //! Render large images in regions (strips) so each output buffer stays within the
 //! device's storage-binding limit; full-image coordinates keep regions aligned.
+//! [`host_output`] and [`host_material`] plan all of this for a device's
+//! [`HostLimits`]: the shader, parameter bytes, buffer size, and each strip's
+//! uniform, workgroups, and readback size, so a host only runs the dispatches.
 //! The `device` feature (on by default) adds [`GpuRenderer`], which does all of this
 //! through its own wgpu device.
 #![deny(missing_docs)]
+mod host;
 mod shader;
+pub use host::*;
 use synarith_core::Program;
 #[cfg(feature = "device")]
 use synarith_cpu::Pixel;
