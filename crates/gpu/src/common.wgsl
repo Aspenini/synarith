@@ -31,3 +31,7 @@ fn hash(v: u32) -> u32 {
 fn hash2(p: vec2<i32>, seed: u32) -> f32 {
     return f32(hash(bitcast<u32>(p.x)*0x9e3779b9u ^ bitcast<u32>(p.y)*0x85ebca6bu ^ seed)>>8u)/16777216.0;
 }
+// Region origin in full-image pixels; negative inside a material render's apron.
+fn origin() -> vec2<f32> {
+    return vec2<f32>(f32(bitcast<i32>(cfg.size.z)), f32(bitcast<i32>(cfg.size.w)));
+}

@@ -55,6 +55,16 @@
 //! Clone [`Cancellation`] to cancel from another thread. CPU work checks between
 //! pixel batches; submitted GPU work finishes before readback cancellation returns.
 //!
+//! # Materials and tiles
+//!
+//! A document's `material { ... }` block declares physically based channels (albedo,
+//! height, roughness, metallic, occlusion, emissive), and `tile;` makes it repeat.
+//! [`Renderer::render_material`] renders every channel at once into
+//! [`MaterialPixels`], including a tangent-space normal derived from the height.
+//! [`Renderer::export_material`] writes them as PNGs. Applications that host the
+//! shaders themselves use [`material_wgsl`], [`material_uniform_bytes`], and
+//! [`MaterialPixels::assemble`]. See the [format guide](mod@format#materials).
+//!
 //! # Architecture
 //!
 //! Three layers separate reusable algorithms from execution:
@@ -91,14 +101,16 @@
 
 pub mod cli;
 mod export;
-pub use export::ImageFormat;
+pub use export::{ImageFormat, MaterialExport};
 use std::{io::Write, path::Path};
 #[doc(inline)]
 pub use synarith_core::*;
 #[doc(inline)]
 pub use synarith_cpu::*;
 #[cfg(feature = "wgsl")]
-pub use synarith_gpu::{WORKGROUP_SIZE, parameter_data, uniform_bytes, wgsl};
+pub use synarith_gpu::{
+    WORKGROUP_SIZE, material_uniform_bytes, material_wgsl, parameter_data, uniform_bytes, wgsl,
+};
 
 /// Backend selection policy; the default policy is [`Auto`](Self::Auto).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -131,10 +143,13 @@ pub struct Renderer {
     precise: bool,
     warnings: Vec<String>,
     cpu: std::collections::BTreeMap<String, CpuProgram>,
+    cpu_material: Option<CpuProgram>,
     #[cfg(feature = "gpu")]
     gpu: Option<synarith_gpu::GpuRenderer>,
     #[cfg(feature = "gpu")]
     compiled: std::collections::BTreeMap<String, synarith_gpu::GpuProgram>,
+    #[cfg(feature = "gpu")]
+    compiled_material: Option<synarith_gpu::GpuProgram>,
 }
 impl Renderer {
     /// Create a CPU renderer without initializing graphics.
@@ -148,10 +163,13 @@ impl Renderer {
             precise: false,
             warnings: Vec::new(),
             cpu: Default::default(),
+            cpu_material: None,
             #[cfg(feature = "gpu")]
             gpu: None,
             #[cfg(feature = "gpu")]
             compiled: Default::default(),
+            #[cfg(feature = "gpu")]
+            compiled_material: None,
         }
     }
     /// Create a renderer with the requested backend policy.
@@ -260,6 +278,7 @@ impl Renderer {
                     }
                     self.gpu = None;
                     self.compiled.clear();
+                    self.compiled_material = None;
                     self.warnings
                         .push(format!("GPU rendering failed; using CPU: {reason}"));
                 }
@@ -272,6 +291,102 @@ impl Renderer {
             );
         }
         self.cpu[&options.output].render_region(&self.program, options, region)
+    }
+    #[cfg(feature = "gpu")]
+    fn gpu_material(
+        &mut self,
+        options: &RenderOptions,
+        region: Region,
+    ) -> Result<Vec<Pixel>, String> {
+        let gpu = self.gpu.as_ref().ok_or("GPU unavailable")?;
+        if self.compiled_material.is_none() {
+            self.compiled_material = Some(gpu.compile_material(&self.program)?);
+        }
+        let compiled = self.compiled_material.as_ref().expect("compiled above");
+        gpu.render_material_planes(&self.program, compiled, options, region)
+    }
+    /// Render every channel of a material region, including the derived normal.
+    ///
+    /// All channels come from one fused evaluation per sample, so work they share
+    /// runs once. The normal is derived from the rendered heights, using one pixel
+    /// of apron around the region, so separately rendered regions join without
+    /// seams. Material renders are not clipped to the view box. `options.output`
+    /// is ignored.
+    ///
+    /// # Errors
+    /// Returns [`check_material`] errors and the backend errors described by
+    /// [`Self::render_region`].
+    pub fn render_material_region(
+        &mut self,
+        options: &RenderOptions,
+        region: Region,
+    ) -> Result<MaterialPixels, String> {
+        let planes = self.material_planes(options, region)?;
+        MaterialPixels::assemble(&self.program, options, region, &planes)
+    }
+    // Fused planes of a material region, on the GPU when available.
+    fn material_planes(
+        &mut self,
+        options: &RenderOptions,
+        region: Region,
+    ) -> Result<Vec<Pixel>, String> {
+        check_material(&self.program, options, region)?;
+        if options.cancellation.is_cancelled() {
+            return Err("render cancelled".into());
+        }
+        self.precise = false;
+        #[cfg(feature = "gpu")]
+        if self.gpu.is_some() {
+            match self.gpu_material(options, region) {
+                Ok(planes) => return Ok(planes),
+                Err(reason) => {
+                    if self.requested == Backend::Gpu || options.cancellation.is_cancelled() {
+                        return Err(reason);
+                    }
+                    self.gpu = None;
+                    self.compiled.clear();
+                    self.compiled_material = None;
+                    self.warnings
+                        .push(format!("GPU rendering failed; using CPU: {reason}"));
+                }
+            }
+        }
+        if self.cpu_material.is_none() {
+            self.cpu_material = Some(CpuProgram::for_material(&self.program)?);
+        }
+        self.cpu_material
+            .as_ref()
+            .expect("prepared above")
+            .render_material_planes(&self.program, options, region)
+    }
+    /// Render every channel of a complete material image in bounded strips.
+    ///
+    /// # Errors
+    /// See [`Self::render_material_region`].
+    pub fn render_material(&mut self, options: &RenderOptions) -> Result<MaterialPixels, String> {
+        let material = check_material(
+            &self.program,
+            options,
+            Region {
+                height: 1,
+                ..options.full_region()
+            },
+        )?
+        .clone();
+        let mut image = MaterialPixels::new(&material, options.width, options.height);
+        let planes = material.planes().len().max(1) as u32;
+        let rows = (4_194_304 / (options.width.saturating_mul(planes)).max(1)).clamp(1, 256);
+        for y in (0..options.height).step_by(rows as usize) {
+            let region = Region {
+                x: 0,
+                y,
+                width: options.width,
+                height: rows.min(options.height - y),
+            };
+            let data = self.material_planes(options, region)?;
+            image.write_region(&self.program, options, region, &data)?;
+        }
+        Ok(image)
     }
     /// Render a complete row-major linear premultiplied RGBA image in bounded strips.
     ///
@@ -342,6 +457,7 @@ impl Renderer {
                 height: 1,
             },
         )?;
+        let kind = self.program.output_kind(&options.output)?;
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -365,7 +481,7 @@ impl Renderer {
                             height: rows.min(options.height - y),
                         },
                     )?;
-                    let data = rgba8(&pixels);
+                    let data = encode_rgba8(kind, &pixels);
                     stream.write_all(&data).map_err(|e| e.to_string())?;
                 }
                 stream.finish().map_err(|e| e.to_string())?;

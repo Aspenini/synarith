@@ -198,6 +198,41 @@ macro_rules! evaluator {
                 }
                 self.eval_node::<false>(id, p, fp, locals, plan, None)
             }
+            /// Wrap a position into the view box of a `tile;` document; others pass through.
+            pub fn wrap(&self, q: [$scalar; 2]) -> [$scalar; 2] {
+                if !self.program.tile {
+                    return q;
+                }
+                let v = self.program.viewbox;
+                std::array::from_fn(|i| {
+                    let origin = <$scalar>::from(v[i]);
+                    let size = <$scalar>::from(v[i + 2]);
+                    let d = q[i] - origin;
+                    origin + d - size * (d / size).floor()
+                })
+            }
+            /// Evaluate a fused block at one sample, leaving every register in `values`;
+            /// read each root's value at its [`FusedBlock::results`] index.
+            #[allow(dead_code)] // Material renders use f32 only.
+            pub(crate) fn eval_fused(
+                &self,
+                block: &FusedBlock,
+                p: [$scalar; 2],
+                fp: $scalar,
+                plan: &ExecutionPlan,
+                values: &mut [Pixel],
+            ) {
+                for (register, instruction) in block.nodes.iter().enumerate() {
+                    values[register] = self.eval_node::<true>(
+                        instruction.node,
+                        p,
+                        fp,
+                        &[],
+                        Some(plan),
+                        Some((values, &instruction.inputs)),
+                    );
+                }
+            }
             #[inline(never)]
             fn eval_registered(
                 &self,
@@ -331,7 +366,7 @@ macro_rules! evaluator {
                                 self.footprint(node.inputs[1], p, fp, locals, plan);
                             return self.eval_with(
                                 node.inputs[0],
-                                [coords[0], coords[1]],
+                                self.wrap([coords[0], coords[1]]),
                                 transformed_fp,
                                 locals,
                                 plan,

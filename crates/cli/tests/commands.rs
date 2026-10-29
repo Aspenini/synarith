@@ -337,3 +337,67 @@ fn render_sequence_and_existing_file_protection() {
     );
     std::fs::remove_dir_all(dir).unwrap();
 }
+#[test]
+fn material_export_writes_every_channel() {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/brick-material.syar");
+    let file = file.to_str().unwrap();
+    let validated = cli(&["validate", file]);
+    assert!(validated.status.success());
+    assert!(
+        String::from_utf8_lossy(&validated.stdout).contains("material: albedo, normal, height")
+    );
+    let inspected: serde_json::Value =
+        serde_json::from_slice(&cli(&["inspect", file]).stdout).unwrap();
+    assert_eq!(inspected["tile"], true);
+    assert!(
+        inspected["outputs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|o| o["name"] == "material.normal" && o["kind"] == "data")
+    );
+    let directory = tempfile::tempdir().unwrap();
+    let out = directory.path().join("brick");
+    let args = [
+        "material",
+        file,
+        "-o",
+        out.to_str().unwrap(),
+        "--size",
+        "32",
+        "--backend",
+        "cpu",
+    ];
+    let exported = cli(&args);
+    assert!(
+        exported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&exported.stderr)
+    );
+    for name in ["albedo", "normal", "height", "roughness", "occlusion"] {
+        assert!(out.join(format!("{name}.png")).is_file(), "{name}");
+    }
+    let description: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(out.join("material.json")).unwrap()).unwrap();
+    assert!(description["height_range"][1].as_f64().unwrap() > 0.0);
+    // Existing files are protected without --force.
+    assert!(!cli(&args).status.success());
+    // A material document renders its albedo as `main`.
+    let png = directory.path().join("main.png");
+    assert!(
+        cli(&[
+            "render",
+            file,
+            "-o",
+            png.to_str().unwrap(),
+            "--width",
+            "16",
+            "--height",
+            "16",
+            "--backend",
+            "cpu"
+        ])
+        .status
+        .success()
+    );
+}

@@ -193,6 +193,14 @@ pub enum StatementKind {
     /// Return a value from this function immediately.
     Return(Expr),
 }
+/// A `material { channel = expression; ... }` block: physically based surface channels.
+#[derive(Clone, Debug)]
+pub struct MaterialBlock {
+    /// Channel assignments in source order; names are checked by the compiler.
+    pub channels: Vec<Declaration>,
+    /// Byte range of the complete block.
+    pub span: Span,
+}
 /// Parsed source and declarations, preserving comments through source spans.
 ///
 /// Parsing checks syntax; [`crate::compile`] performs semantic validation.
@@ -203,6 +211,10 @@ pub struct Document {
     pub source: String,
     /// Explicit opt-in to the bundled, source-defined standard library.
     pub standard_library: Option<Span>,
+    /// A `tile;` declaration: the document repeats across its view box.
+    pub tile: Option<Span>,
+    /// The document's surface material, if it declares one.
+    pub material: Option<MaterialBlock>,
     /// Exposed parameters in declaration order.
     pub parameters: Vec<Parameter>,
     /// Top-level named fields.
@@ -839,6 +851,8 @@ pub fn parse(source: &str) -> Result<Document, Diagnostic> {
     let mut doc = Document {
         source: source.into(),
         standard_library: None,
+        tile: None,
+        material: None,
         parameters: vec![],
         declarations: vec![],
         outputs: vec![],
@@ -886,6 +900,34 @@ pub fn parse(source: &str) -> Result<Document, Diagnostic> {
             }
             "let" => doc.declarations.push(p.declaration(start)?),
             "output" => doc.outputs.push(p.declaration(start)?),
+            "tile" => {
+                p.expect(";")?;
+                if doc.tile.is_some() {
+                    return Err(p.error("duplicate tile"));
+                }
+                doc.tile = Some(Span {
+                    start,
+                    end: p.tokens[p.index - 1].span.end,
+                });
+            }
+            "material" => {
+                if doc.material.is_some() {
+                    return Err(p.error("duplicate material"));
+                }
+                p.expect("{")?;
+                let mut channels = vec![];
+                while !p.eat("}") {
+                    let at = p.token().span.start;
+                    channels.push(p.declaration(at)?);
+                }
+                doc.material = Some(MaterialBlock {
+                    channels,
+                    span: Span {
+                        start,
+                        end: p.tokens[p.index - 1].span.end,
+                    },
+                });
+            }
             "fn" => {
                 let name = p.ident()?;
                 let (args, defaults) = p.signature()?;
@@ -993,12 +1035,27 @@ pub fn parse(source: &str) -> Result<Document, Diagnostic> {
             }
             _ => {
                 return Err(
-                    p.error("expected param, let, fn, group, output, seed, viewbox, or editor")
+                    p.error("expected param, let, fn, group, output, material, tile, seed, viewbox, or editor")
                 );
             }
         }
     }
     Ok(doc)
+}
+
+// Parse one standalone expression (compiler-internal templates).
+pub(crate) fn parse_expression(source: &str) -> Result<Expr, Diagnostic> {
+    let mut p = Parser {
+        source,
+        tokens: lex(source)?,
+        index: 0,
+        depth: 0,
+    };
+    let expr = p.expr(0)?;
+    if p.token().kind != TokenKind::End {
+        return Err(p.error("expected end of expression"));
+    }
+    Ok(expr)
 }
 
 /// Explicit conservative formatter. Comments and strings are retained verbatim.

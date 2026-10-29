@@ -32,6 +32,20 @@ pub struct ExpressionBlock {
     pub reuse_registers: bool,
 }
 
+/// Several roots scheduled as one expression, so work they share runs once per sample.
+///
+/// Built by [`ExecutionPlan::fused`] for rendering many outputs together, such as
+/// the channels of a material. Register rules match [`ExpressionBlock`].
+#[derive(Clone, Debug)]
+pub struct FusedBlock {
+    /// Graph nodes whose values the block produces, in request order.
+    pub roots: Vec<usize>,
+    /// Each entry writes the register at its index, reading only earlier registers.
+    pub nodes: Vec<ScheduledNode>,
+    /// Register holding each root's value, in `roots` order.
+    pub results: Vec<usize>,
+}
+
 /// Reusable execution schedule shared by CPU evaluation and GPU code generation.
 ///
 /// Common graph references are evaluated once per expression. Sampling sources
@@ -42,6 +56,7 @@ pub struct ExpressionBlock {
 #[derive(Clone, Debug)]
 pub struct ExecutionPlan {
     blocks: Vec<Option<ExpressionBlock>>,
+    fused: Option<FusedBlock>,
     /// Reachable function indices, in dependency order.
     pub functions: BTreeSet<usize>,
     /// Total operations stored across all expression blocks.
@@ -75,7 +90,7 @@ impl ExecutionPlan {
     /// # Errors
     /// Returns an error if scheduling exceeds its bounded instruction allocation.
     pub fn compile(program: &Program) -> Result<Self, String> {
-        Self::build(program, program.outputs.values().copied().collect())
+        Self::build(program, program.outputs.values().copied().collect(), &[])
     }
 
     /// Schedule one output, excluding code reachable only from other outputs.
@@ -83,73 +98,46 @@ impl ExecutionPlan {
     /// # Errors
     /// Returns unknown-output or bounded scheduling-allocation errors.
     pub fn for_output(program: &Program, output: &str) -> Result<Self, String> {
-        Self::build(program, vec![program.output(output)?])
+        Self::build(program, vec![program.output(output)?], &[])
     }
 
-    fn build(program: &Program, mut queue: Vec<usize>) -> Result<Self, String> {
+    /// Schedule several outputs as one [`FusedBlock`], evaluating their shared
+    /// expressions once per sample. Lazily sampled sources and function bodies
+    /// still get their own blocks.
+    ///
+    /// # Errors
+    /// Returns unknown-output or bounded scheduling-allocation errors.
+    pub fn fused(program: &Program, outputs: &[&str]) -> Result<Self, String> {
+        let roots = outputs
+            .iter()
+            .map(|name| program.output(name))
+            .collect::<Result<Vec<_>, _>>()?;
+        Self::build(program, vec![], &roots)
+    }
+
+    fn build(program: &Program, mut queue: Vec<usize>, fused: &[usize]) -> Result<Self, String> {
         let mut plan = Self {
             blocks: vec![None; program.nodes.len()],
+            fused: None,
             functions: BTreeSet::new(),
             instruction_count: 0,
         };
+        if !fused.is_empty() {
+            let (nodes, registers) = plan.schedule(program, fused, &mut queue)?;
+            plan.fused = Some(FusedBlock {
+                roots: fused.to_vec(),
+                results: fused
+                    .iter()
+                    .map(|root| registers[*root].expect("roots are scheduled"))
+                    .collect(),
+                nodes,
+            });
+        }
         while let Some(root) = queue.pop() {
             if plan.blocks[root].is_some() {
                 continue;
             }
-            let mut needed = BTreeSet::new();
-            let mut pending = vec![root];
-            while let Some(id) = pending.pop() {
-                if !needed.insert(id) {
-                    continue;
-                }
-                let node = &program.nodes[id];
-                if let NodeKind::Call(index) = node.kind
-                    && plan.functions.insert(index)
-                {
-                    roots(&program.functions[index].body, &mut queue);
-                }
-                let lazy = matches!(node.kind, NodeKind::Builtin(Op::SampleAt | Op::Footprint));
-                if lazy {
-                    queue.push(node.inputs[0]);
-                    if matches!(node.kind, NodeKind::Builtin(Op::SampleAt)) {
-                        // Coordinate expressions are also sampled for their footprint.
-                        queue.push(node.inputs[1]);
-                    }
-                }
-                pending.extend(
-                    node.inputs
-                        .iter()
-                        .enumerate()
-                        .filter_map(|(i, id)| (!(lazy && i == 0)).then_some(*id)),
-                );
-            }
-            plan.instruction_count += needed.len();
-            if plan.instruction_count > MAX_SCHEDULED_INSTRUCTIONS {
-                return Err("execution plan exceeds 262144 scheduled instructions".into());
-            }
-            let mut registers = vec![None; program.nodes.len()];
-            let mut nodes = Vec::with_capacity(needed.len());
-            for id in needed {
-                let node = &program.nodes[id];
-                let inputs = node
-                    .inputs
-                    .iter()
-                    .enumerate()
-                    .map(|(i, input)| {
-                        if i == 0
-                            && matches!(node.kind, NodeKind::Builtin(Op::SampleAt | Op::Footprint))
-                        {
-                            None
-                        } else {
-                            Some(
-                                registers[*input].expect("compiler dependencies precede consumers"),
-                            )
-                        }
-                    })
-                    .collect();
-                registers[id] = Some(nodes.len());
-                nodes.push(ScheduledNode { node: id, inputs });
-            }
+            let (nodes, _) = plan.schedule(program, &[root], &mut queue)?;
             // Cheap leaves are often repeated without repeating mathematical work.
             // Favor registers when a shared call, sampler, or substantial subgraph
             // would otherwise be recomputed; retain direct trees for small cases.
@@ -186,6 +174,74 @@ impl ExecutionPlan {
             });
         }
         Ok(plan)
+    }
+
+    // Schedule everything `targets` need in dependency order, queueing lazily
+    // sampled sources and reachable function bodies as roots of their own blocks.
+    fn schedule(
+        &mut self,
+        program: &Program,
+        targets: &[usize],
+        queue: &mut Vec<usize>,
+    ) -> Result<(Vec<ScheduledNode>, Vec<Option<usize>>), String> {
+        let mut needed = BTreeSet::new();
+        let mut pending = targets.to_vec();
+        while let Some(id) = pending.pop() {
+            if !needed.insert(id) {
+                continue;
+            }
+            let node = &program.nodes[id];
+            if let NodeKind::Call(index) = node.kind
+                && self.functions.insert(index)
+            {
+                roots(&program.functions[index].body, queue);
+            }
+            let lazy = matches!(node.kind, NodeKind::Builtin(Op::SampleAt | Op::Footprint));
+            if lazy {
+                queue.push(node.inputs[0]);
+                if matches!(node.kind, NodeKind::Builtin(Op::SampleAt)) {
+                    // Coordinate expressions are also sampled for their footprint.
+                    queue.push(node.inputs[1]);
+                }
+            }
+            pending.extend(
+                node.inputs
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, id)| (!(lazy && i == 0)).then_some(*id)),
+            );
+        }
+        self.instruction_count += needed.len();
+        if self.instruction_count > MAX_SCHEDULED_INSTRUCTIONS {
+            return Err("execution plan exceeds 262144 scheduled instructions".into());
+        }
+        let mut registers = vec![None; program.nodes.len()];
+        let mut nodes = Vec::with_capacity(needed.len());
+        for id in needed {
+            let node = &program.nodes[id];
+            let inputs = node
+                .inputs
+                .iter()
+                .enumerate()
+                .map(|(i, input)| {
+                    if i == 0
+                        && matches!(node.kind, NodeKind::Builtin(Op::SampleAt | Op::Footprint))
+                    {
+                        None
+                    } else {
+                        Some(registers[*input].expect("compiler dependencies precede consumers"))
+                    }
+                })
+                .collect();
+            registers[id] = Some(nodes.len());
+            nodes.push(ScheduledNode { node: id, inputs });
+        }
+        Ok((nodes, registers))
+    }
+
+    /// The fused multi-output block, for plans built with [`Self::fused`].
+    pub fn fused_block(&self) -> Option<&FusedBlock> {
+        self.fused.as_ref()
     }
 
     /// Return a scheduled expression; `None` means it is unreachable or not a root.

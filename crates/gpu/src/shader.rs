@@ -4,6 +4,141 @@ use synarith_core::*;
 pub fn generate(program: &Program, output: &str) -> Result<String, String> {
     let root = program.output(output)?;
     let plan = ExecutionPlan::for_output(program, output)?;
+    let mut source = prelude(program, &plan);
+    for block in plan.blocks() {
+        writeln!(
+            source,
+            "fn n{}(p:vec2<f32>,fp:f32,env:ptr<function,Frame>)->vec4<f32>{{",
+            block.root
+        )
+        .unwrap();
+        registers(program, &block.nodes, &mut source);
+        writeln!(source, "return r{};}}", block.nodes.len() - 1).unwrap();
+    }
+    user_functions(program, &plan, &mut source);
+    // Tile documents repeat instead of clipping to the view box.
+    let sample = if program.tile {
+        format!("sum+=n{root}(wrap(p),cfg.geom.z/f32(samples),env);")
+    } else {
+        format!(
+            "if all(p>=cfg.viewbox.xy) && all(p<=cfg.viewbox.xy+cfg.viewbox.zw) {{sum+=n{root}(p,cfg.geom.z/f32(samples),env);}}"
+        )
+    };
+    write!(
+        source,
+        r#"
+@compute @workgroup_size(8,8)
+fn main(@builtin(global_invocation_id) gid:vec3<u32>) {{
+    if gid.x>=cfg.state.x || gid.y>=cfg.state.y {{return;}}
+    var root_env:Frame;let env=&root_env;
+    var sum=vec4<f32>(0.0);let samples=cfg.state.z;
+    for(var sy=0u;sy<samples;sy++) {{for(var sx=0u;sx<samples;sx++) {{
+        let pixel=origin()+vec2<f32>(gid.xy)+(vec2<f32>(f32(sx),f32(sy))+0.5)/f32(samples);
+        let p=cfg.geom.xy+pixel*cfg.geom.z;
+        {sample}
+    }}}}
+    pixels[gid.y*cfg.state.x+gid.x]=clean(sum/f32(samples*samples));
+}}
+"#
+    )
+    .unwrap();
+    Ok(source)
+}
+
+/// One compute shader evaluating every material plane at once, unclipped.
+pub fn generate_material(program: &Program) -> Result<String, String> {
+    let material = program
+        .material
+        .as_ref()
+        .ok_or("document has no material")?;
+    let names: Vec<String> = material
+        .evaluated()
+        .iter()
+        .map(|c| c.output_name())
+        .collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let plan = ExecutionPlan::fused(program, &names)?;
+    let fused = plan
+        .fused_block()
+        .ok_or("material plan has no fused block")?;
+    let count = material.planes().len();
+    let mut source = prelude(program, &plan);
+    for block in plan.blocks() {
+        writeln!(
+            source,
+            "fn n{}(p:vec2<f32>,fp:f32,env:ptr<function,Frame>)->vec4<f32>{{",
+            block.root
+        )
+        .unwrap();
+        registers(program, &block.nodes, &mut source);
+        writeln!(source, "return r{};}}", block.nodes.len() - 1).unwrap();
+    }
+    writeln!(
+        source,
+        "fn fused(p:vec2<f32>,fp:f32,env:ptr<function,Frame>)->array<vec4<f32>,{count}>{{"
+    )
+    .unwrap();
+    registers(program, &fused.nodes, &mut source);
+    // A color plane is its channel; the scalar plane packs one channel per component.
+    let mut next = fused.results.iter();
+    let results: Vec<String> = material
+        .planes()
+        .iter()
+        .map(|plane| {
+            let mut registers = plane
+                .iter()
+                .map(|_| next.next().expect("one result per channel"));
+            if plane.len() == 1 && plane[0].ty() == Type::Color {
+                format!("r{}", registers.next().unwrap())
+            } else {
+                let mut parts: Vec<String> = registers.map(|r| format!("r{r}.x")).collect();
+                parts.resize(4, "0.0".into());
+                format!("vec4<f32>({})", parts.join(","))
+            }
+        })
+        .collect();
+    writeln!(
+        source,
+        "return array<vec4<f32>,{count}>({});}}",
+        results.join(",")
+    )
+    .unwrap();
+    user_functions(program, &plan, &mut source);
+    let wrap = if program.tile { "wrap" } else { "" };
+    let mut accumulate = String::new();
+    let mut store = String::new();
+    for c in 0..count {
+        write!(accumulate, "sums[{c}]+=v[{c}];").unwrap();
+        write!(
+            store,
+            "pixels[{c}u*plane+i]=clean(sums[{c}]/f32(samples*samples));"
+        )
+        .unwrap();
+    }
+    write!(
+        source,
+        r#"
+@compute @workgroup_size(8,8)
+fn main(@builtin(global_invocation_id) gid:vec3<u32>) {{
+    if gid.x>=cfg.state.x || gid.y>=cfg.state.y {{return;}}
+    var root_env:Frame;let env=&root_env;
+    var sums:array<vec4<f32>,{count}>;let samples=cfg.state.z;
+    for(var sy=0u;sy<samples;sy++) {{for(var sx=0u;sx<samples;sx++) {{
+        let pixel=origin()+vec2<f32>(gid.xy)+(vec2<f32>(f32(sx),f32(sy))+0.5)/f32(samples);
+        let v=fused({wrap}(cfg.geom.xy+pixel*cfg.geom.z),cfg.geom.z/f32(samples),env);
+        {accumulate}
+    }}}}
+    let plane=cfg.state.x*cfg.state.y;let i=gid.y*cfg.state.x+gid.x;
+    {store}
+}}
+"#
+    )
+    .unwrap();
+    Ok(source)
+}
+
+// Shared bindings and helpers, the function frame, and tile wrapping.
+fn prelude(program: &Program, plan: &ExecutionPlan) -> String {
     let mut source = include_str!("common.wgsl").to_owned();
     let slots = plan
         .functions
@@ -13,65 +148,50 @@ pub fn generate(program: &Program, output: &str) -> Result<String, String> {
         .unwrap_or(1)
         .max(1);
     writeln!(source, "alias Frame = array<vec4<f32>,{slots}>;").unwrap();
-    for block in plan.blocks() {
-        let id = block.root;
-        writeln!(
-            source,
-            "fn n{id}(p:vec2<f32>,fp:f32,env:ptr<function,Frame>)->vec4<f32>{{"
-        )
-        .unwrap();
-        for (register, instruction) in block.nodes.iter().enumerate() {
-            let node = &program.nodes[instruction.node];
-            writeln!(source, "var r{register}:vec4<f32>;{{").unwrap();
-            for (i, input) in instruction.inputs.iter().enumerate() {
-                if let Some(input) = input {
-                    writeln!(source, "let {}=r{input};", (b'a' + i as u8) as char).unwrap();
-                }
-            }
-            let expression = match &node.kind {
-                NodeKind::Constant(v) => format!(
-                    "vec4<f32>({:.9e},{:.9e},{:.9e},{:.9e})",
-                    v.data[0], v.data[1], v.data[2], v.data[3]
-                ),
-                NodeKind::Local(slot) => format!("(*env)[{slot}]"),
-                NodeKind::Call(index) => format!(
-                    "f{index}(p,fp{})",
-                    (0..node.inputs.len())
-                        .map(|i| format!(",{}", (b'a' + i as u8) as char))
-                        .collect::<String>()
-                ),
-                NodeKind::Position => "vec4<f32>(p,0.0,0.0)".into(),
-                NodeKind::Time => "vec4<f32>(cfg.clock.x)".into(),
-                NodeKind::Parameter(index) => format!("params[{index}]"),
-                NodeKind::Unary(op) => match op.as_str() {
-                    "-" => "-a",
-                    "!" => "vec4<f32>(select(0.0,1.0,a.x==0.0))",
-                    _ => "a",
-                }
-                .into(),
-                NodeKind::Binary(op) => binary(op),
-                NodeKind::Builtin(op) => builtin(*op, node, program, &mut source),
-            };
-            writeln!(source, "r{register}=clean({expression});}}").unwrap();
-        }
-        writeln!(source, "return r{};}}", block.nodes.len() - 1).unwrap();
+    if program.tile {
+        let [x, y, w, h] = program.viewbox;
+        writeln!(source, "const TILE_ORIGIN=vec2<f32>({x:.9e},{y:.9e});const TILE_SIZE=vec2<f32>({w:.9e},{h:.9e});").unwrap();
+        source.push_str("fn wrap(q:vec2<f32>)->vec2<f32>{let d=q-TILE_ORIGIN;return TILE_ORIGIN+d-TILE_SIZE*floor(d/TILE_SIZE);}\n");
     }
-    user_functions(program, &plan, &mut source);
-    write!(source, r#"
-@compute @workgroup_size(8,8)
-fn main(@builtin(global_invocation_id) gid:vec3<u32>) {{
-    if gid.x>=cfg.state.x || gid.y>=cfg.state.y {{return;}}
-    var root_env:Frame;let env=&root_env;
-    var sum=vec4<f32>(0.0);let samples=cfg.state.z;
-    for(var sy=0u;sy<samples;sy++) {{for(var sx=0u;sx<samples;sx++) {{
-        let pixel=vec2<f32>(cfg.size.zw+gid.xy)+(vec2<f32>(f32(sx),f32(sy))+0.5)/f32(samples);
-        let p=cfg.geom.xy+pixel*cfg.geom.z;
-        if all(p>=cfg.viewbox.xy) && all(p<=cfg.viewbox.xy+cfg.viewbox.zw) {{sum+=n{root}(p,cfg.geom.z/f32(samples),env);}}
-    }}}}
-    pixels[gid.y*cfg.state.x+gid.x]=clean(sum/f32(samples*samples));
-}}
-"#).unwrap();
-    Ok(source)
+    source
+}
+
+// Scheduled nodes as WGSL temporaries `r0`, `r1`, ...
+fn registers(program: &Program, nodes: &[ScheduledNode], source: &mut String) {
+    for (register, instruction) in nodes.iter().enumerate() {
+        let node = &program.nodes[instruction.node];
+        writeln!(source, "var r{register}:vec4<f32>;{{").unwrap();
+        for (i, input) in instruction.inputs.iter().enumerate() {
+            if let Some(input) = input {
+                writeln!(source, "let {}=r{input};", (b'a' + i as u8) as char).unwrap();
+            }
+        }
+        let expression = match &node.kind {
+            NodeKind::Constant(v) => format!(
+                "vec4<f32>({:.9e},{:.9e},{:.9e},{:.9e})",
+                v.data[0], v.data[1], v.data[2], v.data[3]
+            ),
+            NodeKind::Local(slot) => format!("(*env)[{slot}]"),
+            NodeKind::Call(index) => format!(
+                "f{index}(p,fp{})",
+                (0..node.inputs.len())
+                    .map(|i| format!(",{}", (b'a' + i as u8) as char))
+                    .collect::<String>()
+            ),
+            NodeKind::Position => "vec4<f32>(p,0.0,0.0)".into(),
+            NodeKind::Time => "vec4<f32>(cfg.clock.x)".into(),
+            NodeKind::Parameter(index) => format!("params[{index}]"),
+            NodeKind::Unary(op) => match op.as_str() {
+                "-" => "-a",
+                "!" => "vec4<f32>(select(0.0,1.0,a.x==0.0))",
+                _ => "a",
+            }
+            .into(),
+            NodeKind::Binary(op) => binary(op),
+            NodeKind::Builtin(op) => builtin(*op, node, program, source),
+        };
+        writeln!(source, "r{register}=clean({expression});}}").unwrap();
+    }
 }
 fn binary(op: &str) -> String {
     match op {
@@ -174,7 +294,8 @@ fn builtin(op: Op, node: &Node, program: &Program, source: &mut String) -> Strin
         SampleAt=>{
             let input=node.inputs[1];let src=node.inputs[0];
             writeln!(source,"var transformed_fp=0.0;if fp>0.0 {{let center=n{input}(p,0.0,env).xy;let dx=n{input}(p+vec2<f32>(fp,0.0),0.0,env).xy;let dy=n{input}(p+vec2<f32>(0.0,fp),0.0,env).xy;transformed_fp=max(length(dx-center),length(dy-center));}}").unwrap();
-            format!("n{src}(b.xy,transformed_fp,env)")
+            let wrap = if program.tile { "wrap" } else { "" };
+            format!("n{src}({wrap}(b.xy),transformed_fp,env)")
         },
         Over=>"vec4<f32>(a.xyz+b.xyz*(1.0-clamp(a.w,0.0,1.0)),clamp(a.w,0.0,1.0)+clamp(b.w,0.0,1.0)*(1.0-clamp(a.w,0.0,1.0)))".into(),
         Mask|Opacity=>"a*clamp(b.x,0.0,1.0)".into(),

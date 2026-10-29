@@ -53,7 +53,9 @@ mod shader;
 use synarith_core::Program;
 #[cfg(feature = "device")]
 use synarith_cpu::Pixel;
-use synarith_cpu::{Mapping, Region, RenderOptions};
+#[cfg(feature = "device")]
+use synarith_cpu::check_material;
+use synarith_cpu::{Mapping, MaterialArea, Region, RenderOptions};
 #[cfg(feature = "device")]
 use wgpu::util::DeviceExt;
 
@@ -79,13 +81,61 @@ pub fn wgsl(program: &Program, output: &str) -> Result<String, String> {
 /// [`RenderOptions::validate`] first. `precise_viewport` is ignored: shaders
 /// evaluate in f32.
 pub fn uniform_bytes(program: &Program, options: &RenderOptions, region: Region) -> [u8; 80] {
+    uniform_area(
+        program,
+        options,
+        region.x as i32,
+        region.y as i32,
+        region.width,
+        region.height,
+    )
+}
+
+/// Generate the compute shader that renders every plane of a document's material.
+///
+/// Bindings match [`wgsl`], except that binding 2 holds `planes × area` pixels:
+/// [`synarith_core::Material::planes`] in order, each [`MaterialArea::around`] the region,
+/// row-major. Color channels fill a plane each; the scalar channels share one plane, one
+/// per component. Shared expressions run once per sample for all channels. Dispatch
+/// `ceil(area.width / 8) × ceil(area.height / 8)` workgroups with
+/// [`material_uniform_bytes`], then pass the read-back pixels to
+/// [`synarith_cpu::MaterialPixels::assemble`], which crops the apron and derives the normal.
+///
+/// # Errors
+/// Returns an error for documents without a material, or execution-plan errors.
+pub fn material_wgsl(program: &Program) -> Result<String, String> {
+    shader::generate_material(program)
+}
+
+/// The uniform block for rendering `region` of a document's material, covering
+/// [`MaterialArea::around`] the region. Use [`synarith_cpu::check_material`] first.
+pub fn material_uniform_bytes(
+    program: &Program,
+    options: &RenderOptions,
+    region: Region,
+) -> [u8; 80] {
+    let Some(material) = &program.material else {
+        return uniform_bytes(program, options, region);
+    };
+    let area = MaterialArea::around(material, region);
+    uniform_area(program, options, area.x, area.y, area.width, area.height)
+}
+
+fn uniform_area(
+    program: &Program,
+    options: &RenderOptions,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> [u8; 80] {
     let viewbox = options.viewport.unwrap_or(program.viewbox);
     let mapping = Mapping::new(viewbox, options.width, options.height);
     let words: [u32; 20] = [
         options.width,
         options.height,
-        region.x,
-        region.y,
+        x as u32,
+        y as u32,
         mapping.origin[0].to_bits(),
         mapping.origin[1].to_bits(),
         mapping.units_per_pixel.to_bits(),
@@ -94,8 +144,8 @@ pub fn uniform_bytes(program: &Program, options: &RenderOptions, region: Region)
         viewbox[1].to_bits(),
         viewbox[2].to_bits(),
         viewbox[3].to_bits(),
-        region.width,
-        region.height,
+        width,
+        height,
         options.samples,
         options.seed.unwrap_or(program.seed),
         options.time.to_bits(),
@@ -147,6 +197,7 @@ pub struct GpuRenderer {
 pub struct GpuProgram {
     pipeline: wgpu::ComputePipeline,
     output: String,
+    material: bool,
 }
 #[cfg(feature = "device")]
 impl GpuRenderer {
@@ -220,7 +271,17 @@ impl GpuRenderer {
     /// # Errors
     /// Returns unknown-output, shader validation, pipeline, or device-resource errors.
     pub fn compile(&self, program: &Program, output: &str) -> Result<GpuProgram, String> {
-        let source = wgsl(program, output)?;
+        self.pipeline(wgsl(program, output)?, output, false)
+    }
+    /// Compile the fused shader that renders every plane of a document's material.
+    ///
+    /// # Errors
+    /// Returns an error for documents without a material, or shader, pipeline,
+    /// or device-resource errors.
+    pub fn compile_material(&self, program: &Program) -> Result<GpuProgram, String> {
+        self.pipeline(material_wgsl(program)?, "material", true)
+    }
+    fn pipeline(&self, source: String, label: &str, material: bool) -> Result<GpuProgram, String> {
         self.scoped(|| {
             let module = self
                 .device
@@ -263,7 +324,7 @@ impl GpuRenderer {
             let pipeline = self
                 .device
                 .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(output),
+                    label: Some(label),
                     layout: Some(&layout),
                     module: &module,
                     entry_point: Some("main"),
@@ -272,7 +333,8 @@ impl GpuRenderer {
                 });
             Ok(GpuProgram {
                 pipeline,
-                output: output.into(),
+                output: label.into(),
+                material,
             })
         })
     }
@@ -296,17 +358,64 @@ impl GpuRenderer {
         if options.precise_viewport.is_some() {
             return Err("GPU execution does not support f64 cameras; use Auto or CPU".into());
         }
-        if compiled.output != options.output {
+        if compiled.material || compiled.output != options.output {
             return Err("GPU program output does not match render options".into());
         }
+        let settings = uniform_bytes(program, options, region);
+        self.dispatch(
+            program,
+            compiled,
+            options,
+            settings,
+            [region.width, region.height],
+            1,
+        )
+    }
+    /// Dispatch every plane of a material region; see [`material_wgsl`] for the
+    /// layout. Pass the result to [`synarith_cpu::MaterialPixels::assemble`].
+    ///
+    /// # Errors
+    /// Returns [`synarith_cpu::check_material`] errors, a program not compiled
+    /// with [`Self::compile_material`], and device, readback, or cancellation errors.
+    pub fn render_material_planes(
+        &self,
+        program: &Program,
+        compiled: &GpuProgram,
+        options: &RenderOptions,
+        region: Region,
+    ) -> Result<Vec<Pixel>, String> {
+        let material = check_material(program, options, region)?;
+        if !compiled.material {
+            return Err("GPU program was not compiled for a material".into());
+        }
+        let area = MaterialArea::around(material, region);
+        let settings = material_uniform_bytes(program, options, region);
+        self.dispatch(
+            program,
+            compiled,
+            options,
+            settings,
+            [area.width, area.height],
+            material.planes().len() as u64,
+        )
+    }
+    fn dispatch(
+        &self,
+        program: &Program,
+        compiled: &GpuProgram,
+        options: &RenderOptions,
+        settings: [u8; 80],
+        size: [u32; 2],
+        planes: u64,
+    ) -> Result<Vec<Pixel>, String> {
         if options.cancellation.is_cancelled() {
             return Err("render cancelled".into());
         }
-        let bytes = u64::from(region.width) * u64::from(region.height) * 16;
+        let bytes = u64::from(size[0]) * u64::from(size[1]) * 16 * planes;
         let limits = self.device.limits();
         let groups = [
-            region.width.div_ceil(WORKGROUP_SIZE),
-            region.height.div_ceil(WORKGROUP_SIZE),
+            size[0].div_ceil(WORKGROUP_SIZE),
+            size[1].div_ceil(WORKGROUP_SIZE),
         ];
         if bytes > u64::from(limits.max_storage_buffer_binding_size)
             || bytes > limits.max_buffer_size
@@ -316,7 +425,6 @@ impl GpuRenderer {
         {
             return Err("region exceeds GPU limits; render smaller tiles".into());
         }
-        let settings = uniform_bytes(program, options, region);
         let parameters = parameter_data(program, options);
         if parameters.len() as u64 * 16 > u64::from(limits.max_storage_buffer_binding_size) {
             return Err("parameters exceed GPU buffer limits".into());

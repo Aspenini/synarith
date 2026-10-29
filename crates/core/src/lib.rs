@@ -39,11 +39,13 @@ mod compiler;
 mod execution;
 pub mod format;
 mod language;
+mod material;
 mod registry;
 mod standard;
 
 pub use compiler::*;
 pub use execution::*;
 pub use language::*;
+pub use material::*;
 pub use registry::*;
 pub use standard::*;

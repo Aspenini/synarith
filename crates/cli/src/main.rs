@@ -57,6 +57,28 @@ enum Command {
         #[command(flatten)]
         render: RenderArgs,
     },
+    /// Export every material channel as PNGs, plus a material.json description.
+    Material {
+        file: PathBuf,
+        /// Directory for albedo.png, normal.png, height.png, ... and material.json.
+        #[arg(short, long)]
+        output: PathBuf,
+        /// Edge length of the square textures, in pixels.
+        #[arg(long, default_value_t = 1024)]
+        size: u32,
+        #[arg(long, default_value = "auto")]
+        backend: Backend,
+        #[arg(long, default_value_t = 0.)]
+        time: f32,
+        #[arg(long)]
+        seed: Option<u32>,
+        #[arg(long, default_value_t = 1)]
+        samples: u32,
+        #[arg(long = "param", value_name = "NAME=VALUE")]
+        parameters: Vec<String>,
+        #[arg(long)]
+        force: bool,
+    },
     /// Export numbered PNG frames. Time is start + frame/fps; no duplicate endpoint.
     Animate {
         file: PathBuf,
@@ -119,6 +141,13 @@ fn run() -> Result<(), String> {
                 program.outputs.len(),
                 program.functions.len()
             );
+            if let Some(material) = &program.material {
+                let names: Vec<_> = material.channels.iter().map(|c| c.name()).collect();
+                println!("material: {}", names.join(", "));
+            }
+            if program.tile {
+                println!("tile: repeats every view box");
+            }
         }
         Command::Fmt {
             file,
@@ -158,7 +187,7 @@ fn run() -> Result<(), String> {
             } else {
                 let file = file.ok_or("provide a file or --operations")?;
                 let program = load(&read(&file)?).map_err(|e| e.to_string())?;
-                serde_json::json!({"version":1,"viewbox":program.viewbox,"seed":program.seed,"nodes":program.nodes.len(),"estimated_cost":program.estimated_cost,"outputs":program.outputs.keys().collect::<Vec<_>>(),"parameters":program.parameters.iter().map(|p|serde_json::json!({"name":p.name,"type":p.ty,"default":p.default})).collect::<Vec<_>>(),"functions":program.functions.iter().map(|f|serde_json::json!({"name":f.name,"parameters":f.parameters.iter().map(|(name,ty)|serde_json::json!({"name":name,"type":ty})).collect::<Vec<_>>(),"result":f.result,"locals":f.locals.len()})).collect::<Vec<_>>()})
+                serde_json::json!({"version":1,"viewbox":program.viewbox,"seed":program.seed,"nodes":program.nodes.len(),"estimated_cost":program.estimated_cost,"tile":program.tile,"material":program.material.as_ref().map(|m|m.channels.iter().map(|c|c.name()).collect::<Vec<_>>()),"outputs":program.outputs.keys().map(|name|serde_json::json!({"name":name,"kind":if program.data_outputs.contains(name){"data"}else{"color"}})).collect::<Vec<_>>(),"parameters":program.parameters.iter().map(|p|serde_json::json!({"name":p.name,"type":p.ty,"default":p.default})).collect::<Vec<_>>(),"functions":program.functions.iter().map(|f|serde_json::json!({"name":f.name,"parameters":f.parameters.iter().map(|(name,ty)|serde_json::json!({"name":name,"type":ty})).collect::<Vec<_>>(),"result":f.result,"locals":f.locals.len()})).collect::<Vec<_>>()})
             };
             println!("{}", serde_json::to_string_pretty(&value).unwrap());
         }
@@ -182,6 +211,61 @@ fn run() -> Result<(), String> {
             eprintln!("{}", renderer.backend_description());
             result?;
             eprintln!("wrote {}", output.display());
+        }
+        Command::Material {
+            file,
+            output,
+            size,
+            backend,
+            time,
+            seed,
+            samples,
+            parameters,
+            force,
+        } => {
+            let program = load(&read(&file)?).map_err(|e| e.to_string())?;
+            let options = RenderOptions {
+                width: size,
+                height: size,
+                time,
+                seed,
+                samples,
+                parameters: apply_overrides(&program, &parameters)?,
+                ..Default::default()
+            };
+            let description = output.join("material.json");
+            if description.exists() && !force {
+                return Err(format!("{} already exists", description.display()));
+            }
+            let tile = program.tile;
+            let mut renderer = Renderer::with_backend(program, backend)?;
+            let result = renderer.export_material(&options, &output, force);
+            for warning in renderer.take_warnings() {
+                eprintln!("warning: {warning}");
+            }
+            eprintln!("{}", renderer.backend_description());
+            let export = result?;
+            let channels: serde_json::Map<_, _> = export
+                .files
+                .iter()
+                .map(|(channel, path)| {
+                    let name = path.file_name().unwrap_or_default().to_string_lossy();
+                    (channel.name().to_string(), serde_json::json!(name))
+                })
+                .collect();
+            let json = serde_json::json!({
+                "size": size,
+                "tile": tile,
+                "channels": channels,
+                "height_range": export.height_range,
+                "normal": "tangent space, +Y up (OpenGL), encoded n*0.5+0.5",
+            });
+            std::fs::write(&description, serde_json::to_string_pretty(&json).unwrap())
+                .map_err(|e| e.to_string())?;
+            for (_, path) in &export.files {
+                eprintln!("wrote {}", path.display());
+            }
+            eprintln!("wrote {}", description.display());
         }
         Command::Animate {
             file,

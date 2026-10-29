@@ -37,15 +37,18 @@
 //!             | "param" identifier ":" type "=" constant ";"
 //!             | "let" identifier "=" expression ";"
 //!             | "output" identifier "=" expression ";"
+//!             | "tile" ";"
+//!             | "material" "{" (channel "=" expression ";")* "}"
 //!             | "group" identifier "(" typed-arguments? ")" "->" type
 //!                   "{" let-declaration* "return" expression ";" "}"
 //!             | "fn" identifier "(" typed-arguments? ")" "->" type block
 //!             | "editor" json-string ";"
 //! typed-argument = identifier ":" type ("=" constant)?
 //! type = "float" | "int" | "bool" | "vec2" | "color"
+//! channel = "albedo" | "height" | "roughness" | "metallic" | "occlusion" | "emissive"
 //! ```
 //!
-//! There must be at least one named color output. Names are unique within their namespace; output
+//! There must be at least one output or a material. Names are unique within their namespace; output
 //! names are separate from expression names. Groups and global values share a declaration
 //! namespace together with functions. Built-in function names may also be value names
 //! (`param scale: float = 6.0;` is valid), but cannot name groups/functions. Built-in variables,
@@ -264,6 +267,71 @@
 //! Seeded noise uses a fixed integer hash. Transcendentals and platform arithmetic can produce
 //! small differences; bitwise identity across platforms is not guaranteed.
 //!
+//! ## Outputs: color and data
+//!
+//! An output may be a `color`, a number, or a `vec2`. Color outputs are display color and are
+//! encoded as straight sRGB when stored in 8 bits. Number and vector outputs are *data*: a float
+//! is stored as opaque grey (`[v, v, v, 1]`) and a `vec2` in red and green (`[x, y, 0, 1]`), and
+//! 8-bit storage keeps them linear. Use data outputs for masks, roughness, heights, and flow maps.
+//! [`crate::Program::output_kind`] reports which is which. Booleans need `select()`.
+//!
+//! ```text
+//! output main = mix(srgb("#13254b"), srgb("#f4c879"), clouds);
+//! output mask = smoothstep(0.4, 0.6, clouds);   // data: linear grey
+//! ```
+//!
+//! ## Tiling
+//!
+//! `tile;` declares that the document repeats across its view box, for textures that wrap. Every
+//! sample position is wrapped into the view box, so zoomed-out views and differently shaped images
+//! show repeats instead of transparent padding, and `sample_at` wraps its coordinates, so blurs,
+//! warps, and derived normals stay seamless across the edge. Tiling does not make a field
+//! periodic by itself: build it from periodic pieces, such as the `tile_*` and `periodic_*`
+//! noise, or patterns with a whole number of cells per tile.
+//!
+//! ## Materials
+//!
+//! A `material` block describes a physically based surface in the metallic-roughness model used
+//! by glTF and real-time engines. Each channel is an expression:
+//!
+//! | Channel | Type | Meaning |
+//! | --- | --- | --- |
+//! | `albedo` | color | Base color; alpha is opacity. Required. |
+//! | `height` | float | Surface relief in document units (the units of `p`). |
+//! | `roughness` | float | 0 smooth to 1 rough. |
+//! | `metallic` | float | 0 dielectric to 1 metal. |
+//! | `occlusion` | float | Ambient occlusion, 0 occluded to 1 open. |
+//! | `emissive` | color | Emitted linear light; may exceed one. |
+//!
+//! ```text
+//! syar 1;
+//! use std;
+//! tile;
+//! let face = coverage(rounded_box(fract(p * 4.0) - 0.5, size: vec2(0.44, 0.44), radius: 0.06));
+//! material {
+//!     albedo = mix(srgb("#8a8f90"), srgb("#d9eef4"), face);
+//!     height = face * 0.004;
+//!     roughness = mix(0.9, 0.1, face);
+//! }
+//! ```
+//!
+//! Channels compile to outputs named `material.albedo`, `material.height`, and so on, which
+//! render like any other output; without its own `main`, the document answers `main` with its
+//! albedo. When `height` is present, the material also has a derived `material.normal`: the
+//! tangent-space normal of the height field, encoded `n * 0.5 + 0.5`, with +Y pointing up the
+//! image (the OpenGL and glTF convention). Because height is in document units, its slopes are
+//! the true slopes of the surface: with a unit view box, a height of 0.01 is a hundredth of a
+//! tile. The normal is a central difference of heights one sample apart (or a thousandth of the
+//! view box for point samples). Albedo and emissive are color; the other channels are data.
+//!
+//! Hosts render every channel at once with a fused material render (`render_material` in the
+//! CPU, GPU, and `synarith` crates): one evaluation per sample computes all channels, so work they
+//! share runs once, and the normal is derived from the rendered heights instead of four extra
+//! height evaluations. The scalar channels travel packed together, one per component of a
+//! single plane, so a material moves little more data than one image. With one sample per axis it equals `material.normal` up to rounding; with
+//! supersampling it is the slope of the supersampled height. Material renders are not clipped to
+//! the view box.
+//!
 //! ## Source-library algorithm families
 //!
 //! Image algorithms are written in `.syar`. The families below require `use std;` or their
@@ -284,8 +352,10 @@
 //!   `periodic_fbm`, `periodic_turbulence`, and `periodic_ridged` repeat every `period`
 //!   units (whole lattice cells) through all octaves, with lacunarity fixed at 2, for
 //!   seamless tiles: sample `p * period` to repeat once per unit square.
-//!   Cellular uses a bounded 3×3 neighborhood. `periodic_noise` takes positive integral lattice
-//!   periods, rounded and clamped to at least one by the library.
+//!   Cellular uses a bounded 3×3 neighborhood. `periodic_noise` and `periodic_cellular` take
+//!   positive integral lattice periods, rounded and clamped to at least one by the library.
+//!   `tile_noise`, `tile_fbm`, `tile_turbulence`, `tile_ridged`, and `tile_cellular` take `p`
+//!   directly and a whole number of `cells` per unit, so `tile_fbm(p, 8.0)` repeats once per tile.
 //! - **Gradients:** linear projection, radial distance, angular position, and a four-stop color
 //!   ramp. Ramp endpoints are 0 and 1, with two movable internal stops `p1` and `p2`.
 //! - **Shapes:** circle, half-extent rectangle, rounded rectangle, approximate ellipse distance,
@@ -299,7 +369,8 @@
 //! - **Coordinates and resampling:** translation, rotation, per-axis scaling, centered repetition,
 //!   mirroring, polar mapping, arbitrary coordinate sampling with `sample_at(source,coordinates)`,
 //!   and a scalar `warp(source,displacement)` helper. Use `sample_at` directly for other types.
-//! - **Effects:** signed-distance fill/stroke/exterior outline/glow, opacity and masking,
+//! - **Effects:** signed-distance fill/stroke/exterior outline/glow, antialiased `coverage`
+//!   (the inside fraction of a distance, as a number), opacity and masking,
 //!   straight-RGB inversion, linear grayscale/contrast/saturation, bounded 3×3 Gaussian blur, and
 //!   height-derived normal color. Blur radius and derivative epsilon are in document units. No
 //!   operation imports or caches a raster asset as document content.

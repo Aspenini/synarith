@@ -7,6 +7,8 @@ pub use functions::{
     MAX_LOOP_ITERATIONS,
 };
 
+// Internal function that encodes a derived material normal.
+const NORMAL_HELPER: &str = "synarith_material_normal";
 /// Maximum number of nodes in a compiler-produced graph (4096).
 pub const MAX_NODES: usize = 4096;
 /// Maximum permitted compiled expression depth (96).
@@ -123,8 +125,17 @@ pub struct ParameterInfo {
 pub struct Program {
     /// Nodes in dependency order, with inputs preceding their consumers.
     pub nodes: Vec<Node>,
-    /// Alphabetically ordered color output names mapped to root node indices.
+    /// Alphabetically ordered output names mapped to color-typed root node indices.
+    ///
+    /// Includes `material.<channel>` outputs for a material block. Scalar and
+    /// vector outputs are stored as opaque colors and listed in [`Self::data_outputs`].
     pub outputs: BTreeMap<String, usize>,
+    /// Outputs that hold linear data rather than display color; see [`OutputKind`].
+    pub data_outputs: BTreeSet<String>,
+    /// Whether the document repeats across its view box (`tile;`).
+    pub tile: bool,
+    /// The document's material channels, if it declares a material block.
+    pub material: Option<Material>,
     /// Parameter definitions in declaration order.
     pub parameters: Vec<ParameterInfo>,
     /// Named compiled fields mapped to node indices, including expanded group locals.
@@ -147,15 +158,38 @@ impl Program {
     pub fn parameter_index(&self, name: &str) -> Option<usize> {
         self.parameters.iter().position(|p| p.name == name)
     }
-    /// Resolve a named color output to its root node index.
+    /// Resolve a named output to its root node index.
+    ///
+    /// A material document without its own `main` output answers `main` with
+    /// `material.albedo`, so hosts that render `main` by default show its color.
     ///
     /// # Errors
     /// Returns an error for an unknown output name.
     pub fn output(&self, name: &str) -> Result<usize, String> {
         self.outputs
-            .get(name)
+            .get(self.output_name(name))
             .copied()
             .ok_or_else(|| format!("unknown output '{name}'"))
+    }
+    /// The declared output a name refers to, applying the `main` material alias.
+    pub fn output_name<'a>(&self, name: &'a str) -> &'a str {
+        if name == "main" && !self.outputs.contains_key("main") && self.material.is_some() {
+            "material.albedo"
+        } else {
+            name
+        }
+    }
+    /// Whether an output holds display color or linear data.
+    ///
+    /// # Errors
+    /// Returns an error for an unknown output name.
+    pub fn output_kind(&self, name: &str) -> Result<OutputKind, String> {
+        self.output(name)?;
+        Ok(if self.data_outputs.contains(self.output_name(name)) {
+            OutputKind::Data
+        } else {
+            OutputKind::Color
+        })
     }
     /// Validate a complete parameter set in declaration order.
     ///
@@ -562,6 +596,109 @@ impl<'a> Compiler<'a> {
             }
         }
     }
+    // Store a scalar or vector output as an opaque color: float as grey, vec2 in red/green.
+    fn data_color(&mut self, id: usize, span: Span) -> Result<usize, Diagnostic> {
+        let (r, g, b) = match self.program.nodes[id].ty {
+            Type::Float | Type::Int => (id, id, id),
+            Type::Vec2 => {
+                let x = self.push(NodeKind::Builtin(Op::X), vec![id], Type::Float, span)?;
+                let y = self.push(NodeKind::Builtin(Op::Y), vec![id], Type::Float, span)?;
+                (x, y, self.literal(Value::float(0.), span)?)
+            }
+            _ => {
+                return Err(self.err(
+                    span,
+                    "outputs must be colors, numbers, or vec2; booleans need select()",
+                ));
+            }
+        };
+        let a = self.literal(Value::float(1.), span)?;
+        self.push(
+            NodeKind::Builtin(Op::Rgba),
+            vec![r, g, b, a],
+            Type::Color,
+            span,
+        )
+    }
+    // The tangent-space normal of a height field: central differences one sample
+    // apart (or a small fixed step for point samples), +Y up the image.
+    fn surface_normal(&mut self, height: usize, span: Span) -> Result<usize, Diagnostic> {
+        let step = 0.001 * self.program.viewbox[2].min(self.program.viewbox[3]);
+        let mut locals = BTreeMap::from([("height".to_string(), height)]);
+        let lines = [
+            ("s", format!("select(pixel_size() > 0.0, pixel_size(), {step:e})")),
+            ("hx", "(sample_at(height, p + vec2(s, 0.0)) - sample_at(height, p - vec2(s, 0.0))) / (2.0 * s)".into()),
+            ("hy", "(sample_at(height, p + vec2(0.0, s)) - sample_at(height, p - vec2(0.0, s))) / (2.0 * s)".into()),
+            // A function evaluates each slope once (see `compile`).
+            ("normal", format!("{NORMAL_HELPER}(hx, hy)")),
+        ];
+        let mut id = height;
+        for (name, source) in lines {
+            let mut expr = crate::language::parse_expression(&source)
+                .expect("normal template is valid syntax");
+            respan(&mut expr, span);
+            id = self.expr(&expr, &locals)?;
+            locals.insert(name.into(), id);
+        }
+        Ok(id)
+    }
+    fn material(&mut self, block: &MaterialBlock) -> Result<(), Diagnostic> {
+        let mut channels = BTreeMap::new();
+        let mut height = None;
+        for decl in &block.channels {
+            let Some(channel) = Channel::from_name(&decl.name) else {
+                return Err(self.err(
+                    decl.span,
+                    format!(
+                        "unknown material channel '{}'; expected albedo, height, roughness, metallic, occlusion, or emissive",
+                        decl.name
+                    ),
+                ));
+            };
+            if channel == Channel::Normal {
+                return Err(self.err(
+                    decl.span,
+                    "the normal is derived from height; assign height instead",
+                ));
+            }
+            if channels.contains_key(&channel) {
+                return Err(self.err(decl.span, format!("duplicate material channel '{channel}'")));
+            }
+            let id = self.expr(&decl.expr, &BTreeMap::new())?;
+            if !compatible(self.program.nodes[id].ty, channel.ty()) {
+                return Err(self.err(
+                    decl.expr.span,
+                    format!("material channel '{channel}' must be {}", channel.ty()),
+                ));
+            }
+            if channel == Channel::Height {
+                height = Some(id);
+            }
+            let id = if channel.ty() == Type::Color {
+                id
+            } else {
+                self.data_color(id, decl.expr.span)?
+            };
+            channels.insert(channel, id);
+        }
+        if !channels.contains_key(&Channel::Albedo) {
+            return Err(self.err(block.span, "material requires an albedo channel"));
+        }
+        if let Some(height) = height {
+            let normal = self.surface_normal(height, block.span)?;
+            channels.insert(Channel::Normal, normal);
+        }
+        for (channel, id) in &channels {
+            self.program.outputs.insert(channel.output_name(), *id);
+            if channel.kind() == OutputKind::Data {
+                self.program.data_outputs.insert(channel.output_name());
+            }
+        }
+        self.program.material = Some(Material {
+            channels: channels.into_keys().collect(),
+        });
+        Ok(())
+    }
     fn constant_scalar(&self, id: usize) -> Option<f32> {
         let node = &self.program.nodes[id];
         if !matches!(node.ty, Type::Float | Type::Int | Type::Bool) {
@@ -691,6 +828,22 @@ fn reserved(name: &str) -> bool {
             | "editor"
     )
 }
+fn respan(expr: &mut Expr, span: Span) {
+    expr.span = span;
+    match &mut expr.kind {
+        ExprKind::Unary(_, a) => respan(a, span),
+        ExprKind::Binary(_, a, b) => {
+            respan(a, span);
+            respan(b, span);
+        }
+        ExprKind::Call(_, args) => {
+            for arg in args {
+                respan(&mut arg.value, span);
+            }
+        }
+        _ => (),
+    }
+}
 fn expression_names(expr: &Expr, names: &mut Vec<String>) {
     match &expr.kind {
         ExprKind::Name(n) => names.push(n.clone()),
@@ -766,6 +919,31 @@ pub fn parse_color(text: &str) -> Result<Value, String> {
 /// operations, incompatible types, cycles/recursion, invalid known constant
 /// arguments, missing color outputs, or graph depth/node/evaluation limits.
 pub fn compile(doc: &Document) -> Result<Program, Diagnostic> {
+    // A derived material normal encodes its slopes in a function, so the slopes are
+    // values computed once rather than expressions counted at every use.
+    let derives_normal = doc
+        .material
+        .as_ref()
+        .is_some_and(|m| m.channels.iter().any(|c| c.name == "height"));
+    if derives_normal && !doc.functions.iter().any(|f| f.name == NORMAL_HELPER) {
+        let source = format!(
+            "{}\nfn {NORMAL_HELPER}(hx: float, hy: float) -> color {{ let m = sqrt(hx*hx + hy*hy + 1.0); return rgba(0.5 - 0.5*hx/m, 0.5 + 0.5*hy/m, 0.5 + 0.5/m); }}\n",
+            doc.source
+        );
+        let expanded = parse(&source)?;
+        return compile(&expanded).map_err(|error| {
+            if error.span.start >= doc.source.len() {
+                let span = doc.material.as_ref().map_or(Span::default(), |m| m.span);
+                Diagnostic::new(
+                    &doc.source,
+                    span,
+                    format!("material normal: {}", error.message),
+                )
+            } else {
+                error
+            }
+        });
+    }
     if let Some(import) = doc.standard_library {
         let expanded = crate::standard::expand(doc)?;
         return compile(&expanded).map_err(|error| {
@@ -863,6 +1041,9 @@ pub fn compile(doc: &Document) -> Result<Program, Diagnostic> {
         program: Program {
             nodes: vec![],
             outputs: BTreeMap::new(),
+            data_outputs: BTreeSet::new(),
+            tile: doc.tile.is_some(),
+            material: None,
             parameters: vec![],
             named_nodes: BTreeMap::new(),
             viewbox: doc.viewbox,
@@ -930,14 +1111,15 @@ pub fn compile(doc: &Document) -> Result<Program, Diagnostic> {
         if c.program.outputs.contains_key(&output.name) {
             return Err(c.err(output.span, "duplicate output name"));
         }
-        let id = c.expr(&output.expr, &BTreeMap::new())?;
+        let mut id = c.expr(&output.expr, &BTreeMap::new())?;
         if c.program.nodes[id].ty != Type::Color {
-            return Err(c.err(
-                output.expr.span,
-                "outputs must be colors; use rgba(), srgb(), or a color-valued function",
-            ));
+            id = c.data_color(id, output.expr.span)?;
+            c.program.data_outputs.insert(output.name.clone());
         }
         c.program.outputs.insert(output.name.clone(), id);
+    }
+    if let Some(block) = &doc.material {
+        c.material(block)?;
     }
     // Validate even unused function definitions, including control flow and bounds.
     for function in &doc.functions {

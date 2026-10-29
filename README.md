@@ -129,6 +129,31 @@ syar render examples/koch-snowflake.syar -o koch.png --output-name still --width
 syar render examples/dragon-curve.syar -o dragon.png --output-name still --width 1400 --height 1040 --samples 2
 ```
 
+## Materials
+
+A `.syar` document can describe a physically based surface instead of (or as well as) an image. Add `tile;` to make it repeat, and a `material` block for its channels:
+
+```text
+syar 1;
+use std;
+tile;
+let face = coverage(rounded_box(fract(p * 4.0) - 0.5, size: vec2(0.44, 0.44), radius: 0.06));
+let wear = tile_fbm(p, 6.0, octaves: 4);
+material {
+    albedo = mix(srgb("#8a8f90"), srgb("#d9eef4"), face);
+    height = face * 0.004 + (wear - 0.5) * 0.0004;   // document units: true relief
+    roughness = mix(0.9, 0.08 + wear * 0.1, face);
+}
+```
+
+Channels are `albedo` (color, required), `height`, `roughness`, `metallic`, `occlusion` (numbers) and `emissive` (color). The tangent-space normal is derived from the height (+Y up, the OpenGL/glTF convention), so a texture's relief is written once and its normal map and parallax depth agree. Rendering a material evaluates every channel in one pass, so the work they share runs once per pixel and the normal costs no extra evaluations. In a `tile;` document, sampling and resampling wrap around the view box, so blurs and normals stay seamless across the edge. The `tile_noise`, `tile_fbm`, `tile_turbulence`, `tile_ridged` and `tile_cellular` helpers repeat a whole number of `cells` per tile.
+
+```sh
+syar material examples/brick-material.syar -o brick --size 2048
+```
+
+writes `albedo.png`, `normal.png`, `height.png` (16-bit), `roughness.png`, `occlusion.png` and a `material.json` with the height range. Ordinary outputs can also be numbers or vectors (`output mask = ...;`); these are stored as linear data rather than sRGB color.
+
 ## Documentation
 
 The API reference, format guide, CLI manual, and examples live in Rust doc comments beside the code. Generate the searchable HTML reference with:

@@ -1,0 +1,50 @@
+syar 1;
+// Weathered brick: a seamless physically based material. One unit square is
+// one tile of eight courses, each brick with its own tone, chips and wear.
+//
+//   syar material examples/brick-material.syar -o brick --size 2048
+//
+// writes albedo, normal, height, roughness, occlusion and emissive PNGs.
+use std;
+tile;
+seed 1879;
+
+param brick: color = srgb("#9c4a32");
+param brick_dark: color = srgb("#6d2f21");
+param mortar: color = srgb("#b9b1a3");
+param courses: float = 8.0;     // brick rows per tile
+param per_course: float = 4.0;  // bricks per row
+param depth: float = 0.004;     // mortar recess, in tile units
+
+// Running bond: every other course is offset by half a brick.
+let row = floor(y(p) * courses);
+let shift = select(row % 2.0 == 1.0, 0.5, 0.0);
+let along = x(p) * per_course + shift;
+let id = vec2(floor(along) % per_course, row);
+let local = vec2(fract(along) - 0.5, fract(y(p) * courses) - 0.5);
+let half = vec2(0.5 / per_course, 0.5 / courses);
+let size = vec2(1.0 / per_course, 1.0 / courses);
+
+// Brick face, with chipped corners from a little seamless noise on the edge.
+let chips = (tile_fbm(p, 64.0, octaves: 3, seed: 7) - 0.5) * 0.004;
+let face_distance = rounded_box(local * size, size: half - vec2(0.003, 0.003), radius: 0.002) + chips;
+let face = coverage(face_distance);
+let bevel = smoothstep(-0.004, 0.0, face_distance);
+
+// Per-brick tone, fired-clay mottling and soot from the bottom of each course.
+let tone = hash(id, 1);
+let mottle = tile_fbm(p, 24.0, octaves: 4, seed: 11);
+let soot = smoothstep(0.1, 0.5, y(local) + 0.5) * hash(id, 2) * 0.4;
+let pores = smoothstep(0.08, 0.0, tile_cellular(p, 90.0, seed: 13));
+let clay = mix(brick, brick_dark, clamp(tone * 0.6 + (mottle - 0.5) * 0.5 + soot, 0.0, 1.0));
+let grit = tile_fbm(p, 120.0, octaves: 2, seed: 17);
+
+// Weather: a broad damp patch darkens and smooths everything it touches.
+let damp = smoothstep(0.55, 0.75, tile_fbm(p, 2.0, octaves: 5, seed: 19));
+
+material {
+    albedo = mix(mix(mortar, mortar * 0.85, grit), clay * (1.0 - pores * 0.3), face) * (1.0 - damp * 0.25);
+    height = face * depth - bevel * face * depth * 0.4 + (mottle - 0.5) * 0.0004 - pores * 0.0002 + (grit - 0.5) * 0.0002;
+    roughness = clamp(mix(0.95, 0.8 - tone * 0.1, face) - damp * 0.3, 0.0, 1.0);
+    occlusion = mix(0.55, 1.0, face) * (1.0 - pores * 0.2);
+}

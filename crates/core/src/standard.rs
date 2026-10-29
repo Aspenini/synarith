@@ -45,7 +45,8 @@ fn statements(body: &[Statement], calls: &mut BTreeSet<String>) {
 }
 fn calls(doc: &Document) -> BTreeSet<String> {
     let mut calls = BTreeSet::new();
-    for d in doc.declarations.iter().chain(&doc.outputs) {
+    let material = doc.material.iter().flat_map(|m| &m.channels);
+    for d in doc.declarations.iter().chain(&doc.outputs).chain(material) {
         expression(&d.expr, &mut calls);
     }
     for g in &doc.groups {

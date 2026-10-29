@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 use synarith::{
-    Backend, Cancellation, ImageFormat, ParameterInfo, RenderOptions, Renderer, load, rgba8,
+    Backend, Cancellation, ImageFormat, ParameterInfo, RenderOptions, Renderer, encode_rgba8, load,
 };
 
 /// A successfully compiled document, ready for playback.
@@ -341,9 +341,14 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, events: mpsc::Sender<WorkerEvent>
                 if !warnings.is_empty() {
                     doc.notice = warnings.join("; ");
                 }
+                // Data outputs (roughness, normals) are shown as their linear values.
+                let kind = doc
+                    .renderer
+                    .program()
+                    .output_kind(&request.options.output)?;
                 Ok(LiveFrame {
                     request,
-                    rgba: rgba8(&pixels),
+                    rgba: encode_rgba8(kind, &pixels),
                     elapsed: start.elapsed(),
                     backend: format!(
                         "{}{}",

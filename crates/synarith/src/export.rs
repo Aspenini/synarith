@@ -1,6 +1,12 @@
-use crate::{Pixel, RenderOptions, Renderer, pixel_rgba8};
+use crate::{
+    Channel, ChannelData, OutputKind, Pixel, RenderOptions, Renderer, pixel_data8, pixel_rgba8,
+};
 use image::{ExtendedColorType, ImageEncoder, codecs};
-use std::{io::Write, path::Path, str::FromStr};
+use std::{
+    io::Write,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
 /// Still-image export format supported by the library and `syar render`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,14 +82,17 @@ impl Renderer {
         {
             return Err("JPEG and TGA dimensions must be at most 65535 per axis".into());
         }
+        let kind = self.program().output_kind(&options.output)?;
         let pixels = self.render(options)?;
         let rgb = matches!(format, ImageFormat::Jpeg | ImageFormat::Ppm);
         let mut data = Vec::new();
         data.try_reserve_exact(pixels.len() * if rgb { 3 } else { 4 })
             .map_err(|_| "unable to allocate encoding buffer")?;
         for pixel in pixels {
-            let pixel = if rgb { flatten_white(pixel) } else { pixel };
-            let encoded = pixel_rgba8(pixel);
+            let encoded = match kind {
+                OutputKind::Color => pixel_rgba8(if rgb { flatten_white(pixel) } else { pixel }),
+                OutputKind::Data => pixel_data8(pixel),
+            };
             data.extend_from_slice(&encoded[..if rgb { 3 } else { 4 }]);
         }
         let parent = path
@@ -148,4 +157,89 @@ fn flatten_white(pixel: Pixel) -> Pixel {
         pixel[2] + background,
         1.,
     ]
+}
+
+/// Files written by [`Renderer::export_material`].
+#[derive(Clone, Debug)]
+pub struct MaterialExport {
+    /// Each channel and the PNG it was written to, in canonical channel order.
+    pub files: Vec<(Channel, PathBuf)>,
+    /// The height channel's `[lowest, highest]` value in document units; its
+    /// 16-bit PNG maps that range to black through white.
+    pub height_range: Option<[f32; 2]>,
+}
+
+impl Renderer {
+    /// Render a material and write one PNG per channel into `directory`, named
+    /// after the channel (`albedo.png`, `normal.png`, ...).
+    ///
+    /// Albedo and emissive are straight sRGB RGBA8; roughness, metallic,
+    /// occlusion, and the normal are linear RGBA8. Height is 16-bit greyscale
+    /// spanning [`MaterialExport::height_range`]. Every file is checked before
+    /// any is written; existing files require `overwrite = true`.
+    ///
+    /// # Errors
+    /// Returns [`Self::render_material`] errors, existing-file errors, and
+    /// filesystem or encoding errors.
+    pub fn export_material(
+        &mut self,
+        options: &RenderOptions,
+        directory: &Path,
+        overwrite: bool,
+    ) -> Result<MaterialExport, String> {
+        let material = self
+            .program()
+            .material
+            .clone()
+            .ok_or("document has no material")?;
+        let files: Vec<(Channel, PathBuf)> = material
+            .channels
+            .iter()
+            .map(|c| (*c, directory.join(format!("{}.png", c.name()))))
+            .collect();
+        if !overwrite && let Some((_, path)) = files.iter().find(|(_, path)| path.exists()) {
+            return Err(format!("{} already exists", path.display()));
+        }
+        let image = self.render_material(options)?;
+        std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+        let mut height_range = None;
+        for ((channel, path), (_, pixels)) in files.iter().zip(&image.channels) {
+            let (color, depth, data) = match pixels {
+                ChannelData::Scalar(heights) if *channel == Channel::Height => {
+                    let (low, high) = heights
+                        .iter()
+                        .fold((f32::MAX, f32::MIN), |(l, h), v| (l.min(*v), h.max(*v)));
+                    height_range = Some([low, high]);
+                    let span = if high > low { high - low } else { 1. };
+                    let data = heights
+                        .iter()
+                        .flat_map(|v| {
+                            ((((v - low) / span).clamp(0., 1.) * 65535. + 0.5) as u16).to_be_bytes()
+                        })
+                        .collect();
+                    (png::ColorType::Grayscale, png::BitDepth::Sixteen, data)
+                }
+                _ => (
+                    png::ColorType::Rgba,
+                    png::BitDepth::Eight,
+                    pixels.rgba8(channel.kind()),
+                ),
+            };
+            let mut temp = tempfile::NamedTempFile::new_in(directory).map_err(|e| e.to_string())?;
+            {
+                let mut encoder = png::Encoder::new(temp.as_file_mut(), image.width, image.height);
+                encoder.set_color(color);
+                encoder.set_depth(depth);
+                let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
+                writer.write_image_data(&data).map_err(|e| e.to_string())?;
+                writer.finish().map_err(|e| e.to_string())?;
+            }
+            temp.as_file().sync_all().map_err(|e| e.to_string())?;
+            temp.persist(path).map_err(|e| e.to_string())?;
+        }
+        Ok(MaterialExport {
+            files,
+            height_range,
+        })
+    }
 }

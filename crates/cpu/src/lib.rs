@@ -369,10 +369,10 @@ impl CpuProgram {
                             let y = (region.y as usize + row) as f32
                                 + (sy as f32 + 0.5) / options.samples as f32;
                             let p = mapping.position(x, y);
-                            if mapping.contains(p) {
+                            if program.tile || mapping.contains(p) {
                                 let value = evaluator.eval_with(
                                     output,
-                                    p,
+                                    evaluator.wrap(p),
                                     mapping.units_per_pixel / options.samples as f32,
                                     &[],
                                     Some(&self.plan),
@@ -438,14 +438,15 @@ impl CpuProgram {
                                 center[0] + (x - f64::from(options.width) * 0.5) * unit,
                                 center[1] + (y - f64::from(options.height) * 0.5) * unit,
                             ];
-                            if p[0] >= view[0]
-                                && p[1] >= view[1]
-                                && p[0] <= view[0] + view[2]
-                                && p[1] <= view[1] + view[3]
+                            if program.tile
+                                || (p[0] >= view[0]
+                                    && p[1] >= view[1]
+                                    && p[0] <= view[0] + view[2]
+                                    && p[1] <= view[1] + view[3])
                             {
                                 let value = evaluator.eval_with(
                                     output,
-                                    p,
+                                    evaluator.wrap(p),
                                     unit / f64::from(options.samples),
                                     &[],
                                     Some(&self.plan),
@@ -591,7 +592,9 @@ pub fn finite(v: f32) -> f32 {
     if v.is_finite() { v } else { 0. }
 }
 mod evaluation;
+mod material;
 /// CPU evaluator with f64 intermediate arithmetic for precise camera rendering.
 /// Source constants and parameter values retain their compiled f32 values.
 pub use evaluation::double::Evaluator as Evaluator64;
 pub use evaluation::single::{Evaluator, hash, hash2};
+pub use material::*;

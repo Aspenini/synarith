@@ -326,3 +326,67 @@ fn camera_uniforms_change_without_recompiling_the_program() {
         );
     }
 }
+
+#[test]
+fn tile_documents_and_material_planes_match_cpu() {
+    let Some(gpu) = adapter() else {
+        return;
+    };
+    let tile = r##"syar 1;use std;tile;
+let h = tile_fbm(p, 5.0, octaves: 4, seed: 2) + tile_cellular(p, 7.0, seed: 4) * 0.3;
+output main = mix(srgb("#203040"), srgb("#e0d0a0"), h);
+output bump = normal(h, strength: 0.05, epsilon: 0.02);
+output mask = h;
+material { albedo = mix(srgb("#203040"), srgb("#e0d0a0"), h); height = h * 0.01; roughness = h; }
+"##;
+    // Zoomed out, a tile document repeats instead of padding.
+    for viewport in [None, Some([-1.0, -0.5, 3.0, 3.0])] {
+        for output in ["main", "bump", "mask"] {
+            compare(
+                &gpu,
+                tile,
+                &format!("tile {output} {viewport:?}"),
+                &RenderOptions {
+                    width: 24,
+                    height: 20,
+                    viewport,
+                    output: output.into(),
+                    ..Default::default()
+                },
+            );
+        }
+    }
+    let program = compile(&parse(tile).unwrap()).unwrap();
+    let compiled = gpu.compile_material(&program).unwrap();
+    let options = RenderOptions {
+        width: 24,
+        height: 24,
+        samples: 2,
+        ..Default::default()
+    };
+    let region = Region {
+        x: 3,
+        y: 0,
+        width: 17,
+        height: 11,
+    };
+    let actual = gpu
+        .render_material_planes(&program, &compiled, &options, region)
+        .unwrap();
+    let expected = CpuProgram::for_material(&program)
+        .unwrap()
+        .render_material_planes(&program, &options, region)
+        .unwrap();
+    assert_eq!(actual.len(), expected.len());
+    let difference = actual
+        .iter()
+        .flatten()
+        .zip(expected.iter().flatten())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    assert!(difference <= 0.004, "material planes: {difference}");
+    assert!(
+        gpu.render_region(&program, &compiled, &options, region)
+            .is_err()
+    );
+}

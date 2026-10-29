@@ -13,6 +13,13 @@
 //! | `inspect --operations` | Print the native core operation registry as JSON |
 //! | `render FILE -o FILE.png` | Render a still |
 //! | `animate FILE -o DIRECTORY` | Render numbered PNG frames |
+//! | `material FILE -o DIRECTORY` | Write every material channel as a PNG, plus `material.json` |
+//!
+//! `material` renders a document's `material` block at `--size` pixels square (default 1024) and
+//! accepts `--backend`, `--time`, `--seed`, `--samples`, `--param`, and `--force`. Albedo and
+//! emissive are sRGB; roughness, metallic, occlusion, and the normal (+Y up, OpenGL) are linear
+//! 8-bit; height is 16-bit greyscale, and `material.json` records its range in document units.
+//! Data outputs rendered with `render` (numbers, vectors) are likewise stored linear.
 //!
 //! Render/animate flags: `--backend auto|cpu|gpu`, `--width`, `--height`, `--time`, `--seed`,
 //! `--samples`, `--output-name`, repeatable `--param NAME=VALUE`, and `--force`. Animate
@@ -38,6 +45,7 @@
 //! ```sh
 //! syar render examples/clouds.syar -o clouds.png --param scale=12.0 --param 'shadow=#061c39' --time 2.5 --backend gpu
 //! syar animate examples/orbit.syar -o orbit --start 0 --frames 120 --fps 30
+//! syar material examples/brick-material.syar -o brick --size 2048
 //! ```
 //!
 //! Diagnostics and progress go to stderr; inspection/formatting data go to stdout. Invalid input or

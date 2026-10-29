@@ -51,7 +51,10 @@ fn diagnoses_invalid_documents() {
             "syar 1;use std;output main=rgba(true,0,0);",
             "incorrect type",
         ),
-        ("syar 1;use std;output main=0.5;", "outputs must be colors"),
+        (
+            "syar 1;use std;output main=t>0.5;",
+            "outputs must be colors, numbers, or vec2",
+        ),
         (
             "syar 1;use std;output main=rgba(1/0,0,0);",
             "division by zero",
