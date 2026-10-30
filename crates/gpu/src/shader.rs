@@ -181,13 +181,13 @@ fn registers(program: &Program, nodes: &[ScheduledNode], source: &mut String) {
             NodeKind::Position => "vec4<f32>(p,0.0,0.0)".into(),
             NodeKind::Time => "vec4<f32>(cfg.clock.x)".into(),
             NodeKind::Parameter(index) => format!("params[{index}]"),
-            NodeKind::Unary(op) => match op.as_str() {
-                "-" => "-a",
-                "!" => "vec4<f32>(select(0.0,1.0,a.x==0.0))",
-                _ => "a",
+            NodeKind::Unary(op) => match op {
+                UnaryOp::Neg => "-a",
+                UnaryOp::Not => "vec4<f32>(select(0.0,1.0,a.x==0.0))",
+                UnaryOp::Plus => "a",
             }
             .into(),
-            NodeKind::Binary(op) => binary(op),
+            NodeKind::Binary(op) => binary(op.symbol()),
             NodeKind::Builtin(op) => builtin(*op, node, program, source),
         };
         writeln!(source, "r{register}=clean({expression});}}").unwrap();

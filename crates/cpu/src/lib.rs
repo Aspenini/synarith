@@ -15,12 +15,16 @@
 //! analytic antialiasing for every field.
 //!
 //! [`CpuProgram`] prepares an [`ExecutionPlan`] once for all outputs or one selected output.
-//! Expensive shared expressions use registers; small trees use direct evaluation.
+//! Renders evaluate in batches: each scheduled node runs across up to 64 samples at
+//! once, storing only the components its type uses, so the interpreter's dispatch
+//! cost is shared and its arithmetic vectorizes. Function branches and loops run
+//! with per-sample masks. Batched renders equal per-sample evaluation exactly.
 //! Branches and loops remain structured, and sampling creates fresh expression
 //! contexts. Prepared programs can be reused across regions, time, and parameters.
-//! [`sample`] and [`Evaluator`] retain recursive reference evaluation for checking
-//! semantics; [`CpuProgram::sample`] uses the prepared path. CPU execution is an
-//! interpreter with no JIT dependency. Rows are distributed through Rayon.
+//! [`sample`] and [`Evaluator`] retain per-sample reference evaluation for checking
+//! semantics; [`CpuProgram::sample`] uses the prepared path, reusing registers for
+//! expensive shared expressions. CPU execution is an interpreter with no JIT
+//! dependency. Rows are distributed through Rayon.
 //! Hashes and operation semantics match the GPU backend; floating-point results
 //! need not be bit-identical. [`RenderOptions::precise_viewport`] evaluates the same
 //! scheduled graph with f64 intermediate arithmetic and coordinates on CPU. Source
@@ -333,12 +337,13 @@ impl CpuProgram {
         if let Some(view) = options.precise_viewport {
             return self.render_precise(program, options, region, &parameters, view);
         }
-        let evaluator = Evaluator {
+        let evaluator = batch::BatchEvaluator::new(
             program,
-            parameters: &parameters,
-            time: options.time,
-            seed: options.seed.unwrap_or(program.seed),
-        };
+            &parameters,
+            options.time,
+            options.seed.unwrap_or(program.seed),
+            &self.plan,
+        );
         let mut pixels = Vec::new();
         let len = region.width as usize * region.height as usize;
         pixels
@@ -350,44 +355,43 @@ impl CpuProgram {
             options.width,
             options.height,
         );
+        let count = (options.samples * options.samples) as f32;
         pixels
             .par_chunks_mut(region.width as usize)
             .enumerate()
-            .try_for_each(|(row, pixels)| -> Result<(), String> {
-                if options.cancellation.is_cancelled() {
-                    return Err("render cancelled".into());
-                }
-                for (col, pixel) in pixels.iter_mut().enumerate() {
-                    if col % 64 == 0 && options.cancellation.is_cancelled() {
-                        return Err("render cancelled".into());
-                    }
-                    let mut total = [0.; 4];
-                    for sy in 0..options.samples {
-                        for sx in 0..options.samples {
-                            let x = (region.x as usize + col) as f32
-                                + (sx as f32 + 0.5) / options.samples as f32;
-                            let y = (region.y as usize + row) as f32
-                                + (sy as f32 + 0.5) / options.samples as f32;
-                            let p = mapping.position(x, y);
-                            if program.tile || mapping.contains(p) {
-                                let value = evaluator.eval_with(
-                                    output,
-                                    evaluator.wrap(p),
-                                    mapping.units_per_pixel / options.samples as f32,
-                                    &[],
-                                    Some(&self.plan),
-                                );
-                                for i in 0..4 {
-                                    total[i] += value[i];
+            .try_for_each_init(
+                batch::Scratch::default,
+                |scratch, (row, pixels)| -> Result<(), String> {
+                    let mut totals = vec![[0f32; 4]; pixels.len()];
+                    let mut colors = [[0f32; 4]; batch::LANES];
+                    batch::row_batches(
+                        &evaluator,
+                        &mapping,
+                        i64::from(region.x),
+                        i64::from(region.y) + row as i64,
+                        pixels.len(),
+                        options.samples,
+                        true,
+                        &options.cancellation,
+                        |lanes, mask, owners| {
+                            evaluator.eval_root(output, lanes, mask, scratch, &mut colors);
+                            for lane in 0..lanes.n {
+                                if mask & (1 << lane) != 0 {
+                                    let total = &mut totals[owners[lane]];
+                                    for i in 0..4 {
+                                        total[i] += colors[lane][i];
+                                    }
                                 }
                             }
-                        }
+                            Ok(())
+                        },
+                    )?;
+                    for (pixel, total) in pixels.iter_mut().zip(totals) {
+                        *pixel = total.map(|v| finite(v / count));
                     }
-                    let count = (options.samples * options.samples) as f32;
-                    *pixel = total.map(|v| finite(v / count));
-                }
-                Ok(())
-            })?;
+                    Ok(())
+                },
+            )?;
         Ok(pixels)
     }
     fn render_precise(
@@ -591,6 +595,7 @@ pub fn pixel_rgba8(p: Pixel) -> [u8; 4] {
 pub fn finite(v: f32) -> f32 {
     if v.is_finite() { v } else { 0. }
 }
+mod batch;
 mod evaluation;
 mod material;
 /// CPU evaluator with f64 intermediate arithmetic for precise camera rendering.

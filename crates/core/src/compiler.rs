@@ -82,16 +82,111 @@ pub enum NodeKind {
     Time,
     /// A render-time parameter index in declaration order.
     Parameter(usize),
-    /// A compiler-validated unary operator (`+`, `-`, or `!`).
-    Unary(String),
-    /// A compiler-validated infix arithmetic, comparison, or logical operator.
-    Binary(String),
+    /// A unary operator.
+    Unary(UnaryOp),
+    /// An infix arithmetic, comparison, or logical operator.
+    Binary(BinaryOp),
     /// A registry operation with arguments in signature order.
     Builtin(Op),
     /// Read a typed slot from the current function's sample-local frame.
     Local(usize),
     /// Call a validated nonrecursive function; inputs supply its argument values.
     Call(usize),
+}
+/// A unary operator: `+`, `-`, or `!`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnaryOp {
+    /// `+value`, which also converts integers to floats where a type requires it.
+    Plus,
+    /// `-value`.
+    Neg,
+    /// `!value`.
+    Not,
+}
+impl UnaryOp {
+    /// The operator's source spelling.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Plus => "+",
+            Self::Neg => "-",
+            Self::Not => "!",
+        }
+    }
+    /// Parse a source spelling.
+    pub fn from_symbol(symbol: &str) -> Option<Self> {
+        [Self::Plus, Self::Neg, Self::Not]
+            .into_iter()
+            .find(|op| op.symbol() == symbol)
+    }
+}
+/// An infix arithmetic, comparison, or logical operator.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BinaryOp {
+    /// `+`
+    Add,
+    /// `-`
+    Sub,
+    /// `*`
+    Mul,
+    /// `/`
+    Div,
+    /// `%`, the floored remainder `a - b * floor(a / b)`.
+    Rem,
+    /// `<`
+    Less,
+    /// `>`
+    Greater,
+    /// `<=`
+    LessEqual,
+    /// `>=`
+    GreaterEqual,
+    /// `==`
+    Equal,
+    /// `!=`
+    NotEqual,
+    /// `&&`
+    And,
+    /// `||`
+    Or,
+}
+impl BinaryOp {
+    const ALL: [BinaryOp; 13] = [
+        Self::Add,
+        Self::Sub,
+        Self::Mul,
+        Self::Div,
+        Self::Rem,
+        Self::Less,
+        Self::Greater,
+        Self::LessEqual,
+        Self::GreaterEqual,
+        Self::Equal,
+        Self::NotEqual,
+        Self::And,
+        Self::Or,
+    ];
+    /// The operator's source spelling.
+    pub fn symbol(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Sub => "-",
+            Self::Mul => "*",
+            Self::Div => "/",
+            Self::Rem => "%",
+            Self::Less => "<",
+            Self::Greater => ">",
+            Self::LessEqual => "<=",
+            Self::GreaterEqual => ">=",
+            Self::Equal => "==",
+            Self::NotEqual => "!=",
+            Self::And => "&&",
+            Self::Or => "||",
+        }
+    }
+    /// Parse a source spelling.
+    pub fn from_symbol(symbol: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|op| op.symbol() == symbol)
+    }
 }
 /// One node in an acyclic compiled graph; inputs index earlier program nodes.
 #[derive(Clone, Debug)]
@@ -344,7 +439,8 @@ impl<'a> Compiler<'a> {
                 if (op == "!" && ty != Type::Bool) || (op != "!" && ty == Type::Bool) {
                     return Err(self.err(span, "invalid unary operand type"));
                 }
-                self.push(NodeKind::Unary(op.clone()), vec![a], ty, span)
+                let op = UnaryOp::from_symbol(op).expect("parser yields valid operators");
+                self.push(NodeKind::Unary(op), vec![a], ty, span)
             }
             ExprKind::Binary(op, a, b) => {
                 let a = self.expr(a, locals)?;
@@ -389,7 +485,8 @@ impl<'a> Compiler<'a> {
                 if matches!(op.as_str(), "/" | "%") && self.constant_scalar(b) == Some(0.) {
                     return Err(self.err(span, "constant division by zero"));
                 }
-                self.push(NodeKind::Binary(op.clone()), vec![a, b], ty, span)
+                let op = BinaryOp::from_symbol(op).expect("parser yields valid operators");
+                self.push(NodeKind::Binary(op), vec![a, b], ty, span)
             }
             ExprKind::Call(name, args) => {
                 if self.doc.functions.iter().any(|f| f.name == *name) {
@@ -500,7 +597,7 @@ impl<'a> Compiler<'a> {
                         );
                     }
                     return if self.program.nodes[id].ty != group.ty {
-                        self.push(NodeKind::Unary("+".into()), vec![id], group.ty, span)
+                        self.push(NodeKind::Unary(UnaryOp::Plus), vec![id], group.ty, span)
                     } else {
                         Ok(id)
                     };
@@ -708,16 +805,16 @@ impl<'a> Compiler<'a> {
             NodeKind::Constant(v) => Some(v.data[0]),
             NodeKind::Unary(op) => self
                 .constant_scalar(self.program.nodes[id].inputs[0])
-                .map(|v| if op == "-" { -v } else { v }),
+                .map(|v| if *op == UnaryOp::Neg { -v } else { v }),
             NodeKind::Binary(op) => {
                 let a = self.constant_scalar(node.inputs[0])?;
                 let b = self.constant_scalar(node.inputs[1])?;
-                match op.as_str() {
-                    "+" => Some(a + b),
-                    "-" => Some(a - b),
-                    "*" => Some(a * b),
-                    "/" => Some(a / b),
-                    "%" => Some(a - b * (a / b).floor()),
+                match op {
+                    BinaryOp::Add => Some(a + b),
+                    BinaryOp::Sub => Some(a - b),
+                    BinaryOp::Mul => Some(a * b),
+                    BinaryOp::Div => Some(a / b),
+                    BinaryOp::Rem => Some(a - b * (a / b).floor()),
                     _ => None,
                 }
             }

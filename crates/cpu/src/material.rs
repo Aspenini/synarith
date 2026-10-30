@@ -410,58 +410,64 @@ impl CpuProgram {
         } else {
             options.parameters.clone()
         };
-        let evaluator = Evaluator {
+        let evaluator = batch::BatchEvaluator::new(
             program,
-            parameters: &parameters,
-            time: options.time,
-            seed: options.seed.unwrap_or(program.seed),
-        };
+            &parameters,
+            options.time,
+            options.seed.unwrap_or(program.seed),
+            &self.plan,
+        );
         let mapping = Mapping::new(
             options.viewport.unwrap_or(program.viewbox),
             options.width,
             options.height,
         );
-        let samples = options.samples;
-        let fp = mapping.units_per_pixel / samples as f32;
+        let count = (options.samples * options.samples) as f32;
+        let width = area.width as usize;
         let rows: Vec<Vec<Pixel>> = (0..area.height)
             .into_par_iter()
-            .map(|row| -> Result<Vec<Pixel>, String> {
-                if options.cancellation.is_cancelled() {
-                    return Err("render cancelled".into());
-                }
-                let mut values = vec![[0.; 4]; block.nodes.len()];
-                let mut line = Vec::with_capacity(area.width as usize * planes);
-                for col in 0..area.width {
-                    if col % 64 == 0 && options.cancellation.is_cancelled() {
-                        return Err("render cancelled".into());
-                    }
-                    let mut sums = vec![[0f32; 4]; planes];
-                    for sy in 0..samples {
-                        for sx in 0..samples {
-                            let x =
-                                (area.x + col as i32) as f32 + (sx as f32 + 0.5) / samples as f32;
-                            let y =
-                                (area.y + row as i32) as f32 + (sy as f32 + 0.5) / samples as f32;
-                            let p = evaluator.wrap(mapping.position(x, y));
-                            evaluator.eval_fused(block, p, fp, &self.plan, &mut values);
-                            for ((plane, component), register) in slots.iter().zip(&block.results) {
-                                let value = values[*register];
-                                match component {
-                                    Some(c) => sums[*plane][*c] += value[0],
-                                    None => {
-                                        for i in 0..4 {
-                                            sums[*plane][i] += value[i];
+            .map_init(
+                batch::Scratch::default,
+                |scratch, row| -> Result<Vec<Pixel>, String> {
+                    // Plane sums for every pixel of the row, pixel-major.
+                    let mut sums = vec![[0f32; 4]; width * planes];
+                    batch::row_batches(
+                        &evaluator,
+                        &mapping,
+                        i64::from(area.x),
+                        i64::from(area.y) + i64::from(row),
+                        width,
+                        options.samples,
+                        false,
+                        &options.cancellation,
+                        |lanes, mask, owners| {
+                            evaluator.eval_fused(
+                                block,
+                                lanes,
+                                mask,
+                                scratch,
+                                |result, lane, value| {
+                                    let (plane, component) = slots[result];
+                                    let sum = &mut sums[owners[lane] * planes + plane];
+                                    match component {
+                                        Some(c) => sum[c] += value[0],
+                                        None => {
+                                            for i in 0..4 {
+                                                sum[i] += value[i];
+                                            }
                                         }
                                     }
-                                }
-                            }
-                        }
-                    }
-                    let count = (samples * samples) as f32;
-                    line.extend(sums.into_iter().map(|s| s.map(|v| finite(v / count))));
-                }
-                Ok(line)
-            })
+                                },
+                            );
+                            Ok(())
+                        },
+                    )?;
+                    Ok(sums
+                        .into_iter()
+                        .map(|s| s.map(|v| finite(v / count)))
+                        .collect())
+                },
+            )
             .collect::<Result<_, _>>()?;
         let n = area.len();
         let mut out = Vec::new();

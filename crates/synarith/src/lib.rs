@@ -81,8 +81,9 @@
 //! Source imports use a cached dependency index, adding only required definitions.
 //! Execution schedules evaluate shared expressions once in a sampling context;
 //! they never reuse values across mutation, coordinates, or footprints. Loops stay
-//! structured. CPU execution chooses registers for substantial sharing and direct
-//! trees for small cases. It remains an interpreter with no machine-code JIT.
+//! structured. CPU renders evaluate each node across batches of up to 64 samples,
+//! with per-sample masks in loops and branches. It remains an interpreter with no
+//! machine-code JIT.
 //! GPU emission uses explicit temporaries and omits unreachable functions.
 //! [`Renderer`] caches CPU schedules and GPU pipelines by output across frames and
 //! tiled exports. The low-level [`CpuProgram`] also supports prepared point sampling.

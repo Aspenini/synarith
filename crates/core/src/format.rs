@@ -93,8 +93,9 @@
 //! All source definitions are still semantically validated, including unused ones.
 //!
 //! Both backends consume this schedule and the same structured function instructions.
-//! CPU execution uses registers where sharing justifies them and direct evaluation
-//! for small trees. GPU emission uses explicit temporaries and native shader loops.
+//! CPU renders evaluate each node across batches of up to 64 samples, with
+//! per-sample masks in loops and branches; point sampling uses registers where
+//! sharing justifies them. GPU emission uses explicit temporaries and native shader loops.
 //! Loops are never expanded into thousands of copied expression nodes. Prepared
 //! CPU schedules and GPU pipelines are reusable across time, parameters, and tiles.
 //! CPU code remains interpreted; no machine-code JIT is included. A plan is limited

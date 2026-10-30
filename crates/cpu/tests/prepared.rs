@@ -110,3 +110,108 @@ fn shared_calls_use_registers_including_the_large_block_path() {
             .is_err()
     );
 }
+
+// Batched rendering evaluates every node across many samples at once; it must
+// produce exactly the pixels of the per-sample interpreter, sample by sample.
+#[test]
+fn batched_renders_equal_the_per_sample_interpreter() {
+    let fern = include_str!("../../../examples/barnsley-fern.syar")
+        .replace("param points: int = 8192;", "param points: int = 256;");
+    let library: String = {
+        // Every source-library algorithm, through a branching, looping function.
+        "syar 1;use std;tile;\n".to_string()
+            + "fn f(q:vec2)->float{var v=x(q);for i in 0..8{if i%2==0{continue;}v=sin(v+float(i));if v<0.0{break;}}while v<0.9 limit 4{v+=0.3;}return v;}\n"
+            + "let h=tile_fbm(p,5.0,octaves:4,seed:2)+tile_cellular(p,7.0)*0.3+tile_ridged(p,3.0)*0.2;\n"
+            + "output a=blur(normal(sample_at(f(p),p*2.0),epsilon:0.01),0.01);\n"
+            + "output b=fill(star(p-vec2(0.5,0.5),points:5),rgba(0.9,0.4,0.1));\n"
+            + "output c=over(stroke(path(p),0.02,rgba(1,1,1,0.5)),overlay(rgba(h,0.2,0.4),glow(circle(p-0.5,0.2),0.1)));\n"
+            + "output d=h;\n"
+            + "material{albedo=rgba(h,h*0.5,0.2);height=h*0.01;roughness=h;occlusion=coverage(box(p-0.5,vec2(0.3,0.2)));}\n"
+    };
+    for source in [
+        include_str!("../../../examples/clouds.syar"),
+        include_str!("../../../examples/paths.syar"),
+        include_str!("../../../examples/mandelbrot.syar"),
+        include_str!("../../../examples/tiles.syar"),
+        include_str!("../../../examples/brick-material.syar"),
+        &fern,
+        &library,
+    ] {
+        let p = compile(&parse(source).unwrap()).unwrap();
+        let parameters = p.defaults();
+        for output in p.outputs.keys() {
+            for samples in [1, 2] {
+                // A view wider than the document exercises padding and tile wrapping.
+                let options = RenderOptions {
+                    width: 9,
+                    height: 7,
+                    samples,
+                    time: 0.7,
+                    viewport: Some([-0.25, -0.1, 1.5, 1.2]),
+                    output: output.clone(),
+                    ..Default::default()
+                };
+                let pixels = render(&p, &options).unwrap();
+                let mapping = Mapping::new(options.viewport.unwrap(), 9, 7);
+                for y in 0..7 {
+                    for x in 0..9 {
+                        let mut total = [0f32; 4];
+                        for sy in 0..samples {
+                            for sx in 0..samples {
+                                let s = samples as f32;
+                                let at = mapping.position(
+                                    x as f32 + (sx as f32 + 0.5) / s,
+                                    y as f32 + (sy as f32 + 0.5) / s,
+                                );
+                                if !p.tile && !mapping.contains(at) {
+                                    continue;
+                                }
+                                let evaluator = Evaluator {
+                                    program: &p,
+                                    parameters: &parameters,
+                                    time: 0.7,
+                                    seed: p.seed,
+                                };
+                                let id = p.output(output).unwrap();
+                                let value = evaluator.eval(
+                                    id,
+                                    evaluator.wrap(at),
+                                    mapping.units_per_pixel / s,
+                                );
+                                for i in 0..4 {
+                                    total[i] += value[i];
+                                }
+                            }
+                        }
+                        let expected = total.map(|v| finite(v / (samples * samples) as f32));
+                        assert_eq!(
+                            pixels[y * 9 + x],
+                            expected,
+                            "{output} at {x},{y} with {samples}"
+                        );
+                    }
+                }
+            }
+        }
+        // Fused material planes equal the material outputs rendered one by one.
+        if let Some(material) = &p.material {
+            let options = RenderOptions {
+                width: 16,
+                height: 16,
+                ..Default::default()
+            };
+            let fused = render_material(&p, &options, options.full_region()).unwrap();
+            for channel in material.planes().concat() {
+                let single = render(
+                    &p,
+                    &RenderOptions {
+                        output: channel.output_name(),
+                        ..options.clone()
+                    },
+                )
+                .unwrap();
+                assert_eq!(fused.get(channel).unwrap().to_pixels(), single, "{channel}");
+            }
+        }
+    }
+}

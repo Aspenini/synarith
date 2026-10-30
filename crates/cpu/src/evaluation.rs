@@ -27,6 +27,28 @@ macro_rules! evaluator {
         fn safe_div(a: $scalar, b: $scalar) -> $scalar {
             if b.abs() > 1e-20 { a / b } else { 0. }
         }
+        fn truth(v: bool) -> $scalar {
+            if v { 1. } else { 0. }
+        }
+        fn binary(op: BinaryOp, a: Pixel, b: Pixel) -> Pixel {
+            match op {
+                BinaryOp::Add => std::array::from_fn(|i| a[i] + b[i]),
+                BinaryOp::Sub => std::array::from_fn(|i| a[i] - b[i]),
+                BinaryOp::Mul => std::array::from_fn(|i| a[i] * b[i]),
+                BinaryOp::Div => std::array::from_fn(|i| safe_div(a[i], b[i])),
+                BinaryOp::Rem => {
+                    std::array::from_fn(|i| a[i] - b[i] * safe_div(a[i], b[i]).floor())
+                }
+                BinaryOp::Less => splat(truth(a[0] < b[0])),
+                BinaryOp::Greater => splat(truth(a[0] > b[0])),
+                BinaryOp::LessEqual => splat(truth(a[0] <= b[0])),
+                BinaryOp::GreaterEqual => splat(truth(a[0] >= b[0])),
+                BinaryOp::Equal => splat(truth(a[0] == b[0])),
+                BinaryOp::NotEqual => splat(truth(a[0] != b[0])),
+                BinaryOp::And => splat(truth(a[0] != 0. && b[0] != 0.)),
+                BinaryOp::Or => splat(truth(a[0] != 0. || b[0] != 0.)),
+            }
+        }
 
         /// Fixed wrapping 32-bit avalanche hash shared with the WGSL backend.
         pub fn hash(mut x: u32) -> u32 {
@@ -211,28 +233,6 @@ macro_rules! evaluator {
                     origin + d - size * (d / size).floor()
                 })
             }
-            /// Evaluate a fused block at one sample, leaving every register in `values`;
-            /// read each root's value at its [`FusedBlock::results`] index.
-            #[allow(dead_code)] // Material renders use f32 only.
-            pub(crate) fn eval_fused(
-                &self,
-                block: &FusedBlock,
-                p: [$scalar; 2],
-                fp: $scalar,
-                plan: &ExecutionPlan,
-                values: &mut [Pixel],
-            ) {
-                for (register, instruction) in block.nodes.iter().enumerate() {
-                    values[register] = self.eval_node::<true>(
-                        instruction.node,
-                        p,
-                        fp,
-                        &[],
-                        Some(plan),
-                        Some((values, &instruction.inputs)),
-                    );
-                }
-            }
             #[inline(never)]
             fn eval_registered(
                 &self,
@@ -290,74 +290,13 @@ macro_rules! evaluator {
                     NodeKind::Parameter(index) => self.parameters[*index].data.map(<$scalar>::from),
                     NodeKind::Unary(op) => {
                         let a = at(0);
-                        match op.as_str() {
-                            "-" => a.map(|v| -v),
-                            "!" => splat(if a[0] == 0. { 1. } else { 0. }),
-                            _ => a,
+                        match op {
+                            UnaryOp::Neg => a.map(|v| -v),
+                            UnaryOp::Not => splat(if a[0] == 0. { 1. } else { 0. }),
+                            UnaryOp::Plus => a,
                         }
                     }
-                    NodeKind::Binary(op) => {
-                        let a = at(0);
-                        let b = at(1);
-                        std::array::from_fn(|i| match op.as_str() {
-                            "+" => a[i] + b[i],
-                            "-" => a[i] - b[i],
-                            "*" => a[i] * b[i],
-                            "/" => safe_div(a[i], b[i]),
-                            "%" => a[i] - b[i] * (safe_div(a[i], b[i])).floor(),
-                            "<" => {
-                                if a[0] < b[0] {
-                                    1.
-                                } else {
-                                    0.
-                                }
-                            }
-                            ">" => {
-                                if a[0] > b[0] {
-                                    1.
-                                } else {
-                                    0.
-                                }
-                            }
-                            "<=" => {
-                                if a[0] <= b[0] {
-                                    1.
-                                } else {
-                                    0.
-                                }
-                            }
-                            ">=" => {
-                                if a[0] >= b[0] {
-                                    1.
-                                } else {
-                                    0.
-                                }
-                            }
-                            "==" => {
-                                if a[0] == b[0] {
-                                    1.
-                                } else {
-                                    0.
-                                }
-                            }
-                            "!=" => {
-                                if a[0] != b[0] {
-                                    1.
-                                } else {
-                                    0.
-                                }
-                            }
-                            "&&" => {
-                                if a[0] != 0. && b[0] != 0. {
-                                    1.
-                                } else {
-                                    0.
-                                }
-                            }
-                            "||" if (a[0] != 0. || b[0] != 0.) => 1.,
-                            _ => 0.,
-                        })
-                    }
+                    NodeKind::Binary(op) => binary(*op, at(0), at(1)),
                     NodeKind::Builtin(op) => {
                         // Source expressions stay lazy, including through expanded library groups.
                         if *op == Op::SampleAt {
