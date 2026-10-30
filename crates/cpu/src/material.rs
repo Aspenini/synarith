@@ -238,12 +238,8 @@ impl MaterialPixels {
                 source.insert(*channel, (i, packed));
             }
         }
-        let unit = Mapping::new(
-            options.viewport.unwrap_or(program.viewbox),
-            options.width,
-            options.height,
-        )
-        .units_per_pixel;
+        let unit =
+            Mapping::new(options.view(program), options.width, options.height).units_per_pixel;
         let height_at = source.get(&Channel::Height).copied();
         self.channels
             .par_iter_mut()
@@ -415,13 +411,10 @@ impl CpuProgram {
             &parameters,
             options.time,
             options.seed.unwrap_or(program.seed),
+            options.tile_span(),
             &self.plan,
         );
-        let mapping = Mapping::new(
-            options.viewport.unwrap_or(program.viewbox),
-            options.width,
-            options.height,
-        );
+        let mapping = Mapping::new(options.view(program), options.width, options.height);
         let count = (options.samples * options.samples) as f32;
         let width = area.width as usize;
         let rows: Vec<Vec<Pixel>> = (0..area.height)

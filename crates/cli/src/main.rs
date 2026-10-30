@@ -74,6 +74,9 @@ enum Command {
         seed: Option<u32>,
         #[arg(long, default_value_t = 1)]
         samples: u32,
+        /// Tiles to span before repeating, per axis; each tile in the span differs.
+        #[arg(long, default_value_t = 1)]
+        tiles: u32,
         #[arg(long = "param", value_name = "NAME=VALUE")]
         parameters: Vec<String>,
         #[arg(long)]
@@ -110,6 +113,9 @@ struct RenderArgs {
     samples: u32,
     #[arg(long, default_value = "main")]
     output_name: String,
+    /// Tiles of a `tile;` document to span before repeating, per axis.
+    #[arg(long, default_value_t = 1)]
+    tiles: u32,
     #[arg(long = "param", value_name = "NAME=VALUE")]
     parameters: Vec<String>,
     #[arg(long)]
@@ -126,6 +132,7 @@ fn options(program: &Program, args: &RenderArgs) -> Result<RenderOptions, String
         seed: args.seed,
         samples: args.samples,
         output: args.output_name.clone(),
+        tiles: [args.tiles; 2],
         parameters: apply_overrides(program, &args.parameters)?,
         ..Default::default()
     })
@@ -187,7 +194,7 @@ fn run() -> Result<(), String> {
             } else {
                 let file = file.ok_or("provide a file or --operations")?;
                 let program = load(&read(&file)?).map_err(|e| e.to_string())?;
-                serde_json::json!({"version":1,"viewbox":program.viewbox,"seed":program.seed,"nodes":program.nodes.len(),"estimated_cost":program.estimated_cost,"tile":program.tile,"material":program.material.as_ref().map(|m|m.channels.iter().map(|c|c.name()).collect::<Vec<_>>()),"outputs":program.outputs.keys().map(|name|serde_json::json!({"name":name,"kind":if program.data_outputs.contains(name){"data"}else{"color"}})).collect::<Vec<_>>(),"parameters":program.parameters.iter().map(|p|serde_json::json!({"name":p.name,"type":p.ty,"default":p.default})).collect::<Vec<_>>(),"functions":program.functions.iter().map(|f|serde_json::json!({"name":f.name,"parameters":f.parameters.iter().map(|(name,ty)|serde_json::json!({"name":name,"type":ty})).collect::<Vec<_>>(),"result":f.result,"locals":f.locals.len()})).collect::<Vec<_>>()})
+                serde_json::json!({"version":1,"viewbox":program.viewbox,"seed":program.seed,"nodes":program.nodes.len(),"estimated_cost":program.estimated_cost,"tile":program.tile,"material":program.material.as_ref().map(|m|m.channels.iter().map(|c|c.name()).collect::<Vec<_>>()),"outputs":program.outputs.keys().map(|name|serde_json::json!({"name":name,"kind":if program.data_outputs.contains(name){"data"}else{"color"}})).collect::<Vec<_>>(),"parameters":program.parameters.iter().map(|p|serde_json::json!({"name":p.name,"type":p.ty,"default":p.default,"range":p.range})).collect::<Vec<_>>(),"functions":program.functions.iter().map(|f|serde_json::json!({"name":f.name,"parameters":f.parameters.iter().map(|(name,ty)|serde_json::json!({"name":name,"type":ty})).collect::<Vec<_>>(),"result":f.result,"locals":f.locals.len()})).collect::<Vec<_>>()})
             };
             println!("{}", serde_json::to_string_pretty(&value).unwrap());
         }
@@ -220,6 +227,7 @@ fn run() -> Result<(), String> {
             time,
             seed,
             samples,
+            tiles,
             parameters,
             force,
         } => {
@@ -230,6 +238,7 @@ fn run() -> Result<(), String> {
                 time,
                 seed,
                 samples,
+                tiles: [tiles; 2],
                 parameters: apply_overrides(&program, &parameters)?,
                 ..Default::default()
             };

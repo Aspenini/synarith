@@ -102,6 +102,7 @@ pub(crate) struct BatchEvaluator<'a> {
     pub parameters: &'a [Value],
     pub time: f32,
     pub seed: u32,
+    pub tiles: [f32; 2],
     pub plan: &'a ExecutionPlan,
     widths: Vec<usize>,
 }
@@ -112,6 +113,7 @@ impl<'a> BatchEvaluator<'a> {
         parameters: &'a [Value],
         time: f32,
         seed: u32,
+        tiles: [f32; 2],
         plan: &'a ExecutionPlan,
     ) -> Self {
         Self {
@@ -119,6 +121,7 @@ impl<'a> BatchEvaluator<'a> {
             parameters,
             time,
             seed,
+            tiles,
             plan,
             widths: program.nodes.iter().map(|n| width(n.ty)).collect(),
         }
@@ -137,7 +140,10 @@ impl<'a> BatchEvaluator<'a> {
             let d = q - origin;
             origin + d - size * (d / size).floor()
         };
-        (w(x, v[0], v[2]), w(y, v[1], v[3]))
+        (
+            w(x, v[0], v[2] * self.tiles[0]),
+            w(y, v[1], v[3] * self.tiles[1]),
+        )
     }
 
     /// Evaluate an output root for a batch; returns its color in `[lane][component]`.
@@ -323,6 +329,10 @@ impl<'a> BatchEvaluator<'a> {
                 o[L..L + n].copy_from_slice(&lanes.y[..n]);
             }
             NodeKind::Time => o[..n].fill(self.time),
+            NodeKind::Tiles => {
+                o[..n].fill(self.tiles[0]);
+                o[L..L + n].fill(self.tiles[1]);
+            }
             NodeKind::Parameter(index) => {
                 let data = self.parameters[*index].data;
                 for c in 0..w {

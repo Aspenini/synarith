@@ -34,7 +34,7 @@
 //! declaration = "use" "std" ";"
 //!             | "seed" u32 ";"
 //!             | "viewbox" "(" number "," number "," number "," number ")" ";"
-//!             | "param" identifier ":" type "=" constant ";"
+//!             | "param" identifier ":" type "=" constant ("in" number ".." number)? ";"
 //!             | "let" identifier "=" expression ";"
 //!             | "output" identifier "=" expression ";"
 //!             | "tile" ";"
@@ -217,7 +217,9 @@
 //! cannot be mixed arithmetically.
 //!
 //! Parameters have constant defaults: literals, unary signed literals, `vec2()`, `rgba()`, or
-//! `srgb()`. Parameters cannot depend on time, position, or other fields. Overrides retain the
+//! `srgb()`. A float or int parameter may give a range, `param wear: float = 0.3 in 0..1;`, as a
+//! hint for editors that show it as a slider; the default must lie inside it. Overrides are not
+//! clamped. Parameters cannot depend on time, position, or other fields. Overrides retain the
 //! declared type. Colors are premultiplied linear RGBA internally; public color parameter values
 //! use the same representation.
 //!
@@ -289,6 +291,20 @@
 //! warps, and derived normals stay seamless across the edge. Tiling does not make a field
 //! periodic by itself: build it from periodic pieces, such as the `tile_*` and `periodic_*`
 //! noise, or patterns with a whole number of cells per tile.
+//!
+//! A host can render a *span* of tiles that repeats only after `tiles` tiles per axis
+//! (`RenderOptions::tiles`, `syar render --tiles`), so that a wall or ceiling built from many
+//! copies doesn't show the same stains every tile. The span covers `p` from the view box origin
+//! across `tiles` view boxes, and wrapping uses that wider period. Documents read the span as the
+//! vec2 `tiles` and the current tile as `tile_id` (whole numbers from zero); both names are built
+//! in unless the document declares them. The `tile_*` noise repeats after the span, and patterns
+//! keyed by cells of `p` (`hash(floor(p * 8.0))`) differ per tile on their own. Anything with a
+//! one-tile period written by hand should multiply its period by `tiles`:
+//!
+//! ```text
+//! let stained = step(0.6, hash(tile_id, 9));          // about 40% of tiles get a stain
+//! let streaks = periodic_noise(p * 12.0, vec2(12.0, 12.0) * tiles);
+//! ```
 //!
 //! ## Materials
 //!

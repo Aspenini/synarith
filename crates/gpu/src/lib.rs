@@ -134,7 +134,7 @@ fn uniform_area(
     width: u32,
     height: u32,
 ) -> [u8; 80] {
-    let viewbox = options.viewport.unwrap_or(program.viewbox);
+    let viewbox = options.view(program);
     let mapping = Mapping::new(viewbox, options.width, options.height);
     let words: [u32; 20] = [
         options.width,
@@ -154,8 +154,8 @@ fn uniform_area(
         options.samples,
         options.seed.unwrap_or(program.seed),
         options.time.to_bits(),
-        0,
-        0,
+        (options.tiles[0] as f32).to_bits(),
+        (options.tiles[1] as f32).to_bits(),
         0,
     ];
     let mut bytes = [0; 80];

@@ -339,17 +339,24 @@ output bump = normal(h, strength: 0.05, epsilon: 0.02);
 output mask = h;
 material { albedo = mix(srgb("#203040"), srgb("#e0d0a0"), h); height = h * 0.01; roughness = h; }
 "##;
-    // Zoomed out, a tile document repeats instead of padding.
-    for viewport in [None, Some([-1.0, -0.5, 3.0, 3.0])] {
+    // Zoomed out, a tile document repeats instead of padding; a span of tiles
+    // widens the repeat.
+    for (viewport, tiles) in [
+        (None, [1, 1]),
+        (Some([-1.0, -0.5, 3.0, 3.0]), [1, 1]),
+        (None, [2, 3]),
+        (Some([-1.0, -0.5, 5.0, 5.0]), [2, 2]),
+    ] {
         for output in ["main", "bump", "mask"] {
             compare(
                 &gpu,
                 tile,
-                &format!("tile {output} {viewport:?}"),
+                &format!("tile {output} {viewport:?} {tiles:?}"),
                 &RenderOptions {
                     width: 24,
                     height: 20,
                     viewport,
+                    tiles,
                     output: output.into(),
                     ..Default::default()
                 },
@@ -362,6 +369,7 @@ material { albedo = mix(srgb("#203040"), srgb("#e0d0a0"), h); height = h * 0.01;
         width: 24,
         height: 24,
         samples: 2,
+        tiles: [2, 2],
         ..Default::default()
     };
     let region = Region {

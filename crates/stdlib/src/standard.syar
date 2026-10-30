@@ -106,25 +106,26 @@ fn periodic_cellular(q: vec2, period: vec2 = vec2(4,4), seed: int = 0) -> float 
 }
 // Seamless tiles: `cells` lattice cells (rounded to a whole number) across each
 // unit of q, so with the default view box `tile_fbm(p, 8.0)` repeats once per tile.
+// The pattern repeats after the render's `tiles`, so each tile of a wider span differs.
 fn tile_noise(q: vec2, cells: float = 4.0, seed: int = 0) -> float {
     let c = max(floor(cells+0.5),1.0);
-    return periodic_noise(q*c,vec2(c,c),seed);
+    return periodic_noise(q*c,vec2(c,c)*tiles,seed);
 }
 group tile_fbm(q: vec2, cells: float = 4.0, octaves: int = 6, gain: float = 0.5, seed: int = 0) -> float {
     let c = max(floor(cells+0.5),1.0);
-    return periodic_fbm(q*c,vec2(c,c),octaves,gain,seed);
+    return periodic_fbm(q*c,vec2(c,c)*tiles,octaves,gain,seed);
 }
 group tile_turbulence(q: vec2, cells: float = 4.0, octaves: int = 6, gain: float = 0.5, seed: int = 0) -> float {
     let c = max(floor(cells+0.5),1.0);
-    return periodic_turbulence(q*c,vec2(c,c),octaves,gain,seed);
+    return periodic_turbulence(q*c,vec2(c,c)*tiles,octaves,gain,seed);
 }
 group tile_ridged(q: vec2, cells: float = 4.0, octaves: int = 6, gain: float = 0.5, seed: int = 0) -> float {
     let c = max(floor(cells+0.5),1.0);
-    return periodic_ridged(q*c,vec2(c,c),octaves,gain,seed);
+    return periodic_ridged(q*c,vec2(c,c)*tiles,octaves,gain,seed);
 }
 fn tile_cellular(q: vec2, cells: float = 4.0, seed: int = 0) -> float {
     let c = max(floor(cells+0.5),1.0);
-    return periodic_cellular(q*c,vec2(c,c),seed);
+    return periodic_cellular(q*c,vec2(c,c)*tiles,seed);
 }
 
 fn linear(q: vec2, start: vec2 = vec2(0,0), end: vec2 = vec2(1,0)) -> float {

@@ -151,7 +151,8 @@ fn prelude(program: &Program, plan: &ExecutionPlan) -> String {
     if program.tile {
         let [x, y, w, h] = program.viewbox;
         writeln!(source, "const TILE_ORIGIN=vec2<f32>({x:.9e},{y:.9e});const TILE_SIZE=vec2<f32>({w:.9e},{h:.9e});").unwrap();
-        source.push_str("fn wrap(q:vec2<f32>)->vec2<f32>{let d=q-TILE_ORIGIN;return TILE_ORIGIN+d-TILE_SIZE*floor(d/TILE_SIZE);}\n");
+        // The period spans the render's tiles (uniform clock.yz).
+        source.push_str("fn wrap(q:vec2<f32>)->vec2<f32>{let d=q-TILE_ORIGIN;let span=TILE_SIZE*cfg.clock.yz;return TILE_ORIGIN+d-span*floor(d/span);}\n");
     }
     source
 }
@@ -180,6 +181,7 @@ fn registers(program: &Program, nodes: &[ScheduledNode], source: &mut String) {
             ),
             NodeKind::Position => "vec4<f32>(p,0.0,0.0)".into(),
             NodeKind::Time => "vec4<f32>(cfg.clock.x)".into(),
+            NodeKind::Tiles => "vec4<f32>(cfg.clock.yz,0.0,0.0)".into(),
             NodeKind::Parameter(index) => format!("params[{index}]"),
             NodeKind::Unary(op) => match op {
                 UnaryOp::Neg => "-a",

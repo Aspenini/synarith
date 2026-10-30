@@ -146,7 +146,7 @@ material {
 }
 ```
 
-Channels are `albedo` (color, required), `height`, `roughness`, `metallic`, `occlusion` (numbers) and `emissive` (color). The tangent-space normal is derived from the height (+Y up, the OpenGL/glTF convention), so a texture's relief is written once and its normal map and parallax depth agree. Rendering a material evaluates every channel in one pass, so the work they share runs once per pixel and the normal costs no extra evaluations. In a `tile;` document, sampling and resampling wrap around the view box, so blurs and normals stay seamless across the edge. The `tile_noise`, `tile_fbm`, `tile_turbulence`, `tile_ridged` and `tile_cellular` helpers repeat a whole number of `cells` per tile.
+Channels are `albedo` (color, required), `height`, `roughness`, `metallic`, `occlusion` (numbers) and `emissive` (color). The tangent-space normal is derived from the height (+Y up, the OpenGL/glTF convention), so a texture's relief is written once and its normal map and parallax depth agree. Rendering a material evaluates every channel in one pass, so the work they share runs once per pixel and the normal costs no extra evaluations. In a `tile;` document, sampling and resampling wrap around the view box, so blurs and normals stay seamless across the edge. The `tile_noise`, `tile_fbm`, `tile_turbulence`, `tile_ridged` and `tile_cellular` helpers repeat a whole number of `cells` per tile. A host can also render a span of tiles (`--tiles 3`) that repeats only after three tiles each way, so a large surface doesn't show the same stains on every tile; documents read `tiles` and `tile_id` to vary per tile.
 
 ```sh
 syar material examples/brick-material.syar -o brick --size 2048

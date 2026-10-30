@@ -149,6 +149,7 @@ impl ExecutionPlan {
                     | NodeKind::Local(_)
                     | NodeKind::Position
                     | NodeKind::Time
+                    | NodeKind::Tiles
                     | NodeKind::Parameter(_) => 0,
                     NodeKind::Call(_) | NodeKind::Builtin(Op::SampleAt | Op::Footprint) => 64,
                     NodeKind::Builtin(

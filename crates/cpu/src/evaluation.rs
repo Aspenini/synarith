@@ -78,6 +78,8 @@ macro_rules! evaluator {
             pub time: $scalar,
             /// Exact effective seed after applying any override.
             pub seed: u32,
+            /// Tiles the render spans ([`RenderOptions::tiles`]), read as `tiles`.
+            pub tiles: [$scalar; 2],
         }
         enum Flow {
             Next,
@@ -228,7 +230,7 @@ macro_rules! evaluator {
                 let v = self.program.viewbox;
                 std::array::from_fn(|i| {
                     let origin = <$scalar>::from(v[i]);
-                    let size = <$scalar>::from(v[i + 2]);
+                    let size = <$scalar>::from(v[i + 2]) * self.tiles[i];
                     let d = q[i] - origin;
                     origin + d - size * (d / size).floor()
                 })
@@ -287,6 +289,7 @@ macro_rules! evaluator {
                     NodeKind::Call(index) => self.call_function(*index, at, p, fp, plan),
                     NodeKind::Position => [p[0], p[1], 0., 0.],
                     NodeKind::Time => splat(self.time),
+                    NodeKind::Tiles => [self.tiles[0], self.tiles[1], 0., 0.],
                     NodeKind::Parameter(index) => self.parameters[*index].data.map(<$scalar>::from),
                     NodeKind::Unary(op) => {
                         let a = at(0);

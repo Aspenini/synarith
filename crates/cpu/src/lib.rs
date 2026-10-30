@@ -96,6 +96,10 @@ pub struct RenderOptions {
     pub samples: u32,
     /// Named color output to evaluate.
     pub output: String,
+    /// Tiles of a `tile;` document the render spans before repeating, per axis
+    /// (1–256). Documents read it as `tiles`; the `tile_*` helpers repeat after
+    /// it, so each tile in the span can differ. The default view widens to match.
+    pub tiles: [u32; 2],
     /// Complete typed values in declaration order; empty selects document defaults.
     pub parameters: Vec<Value>,
     /// Shared cancellation token; clone it to cancel from another thread.
@@ -112,6 +116,7 @@ impl Default for RenderOptions {
             seed: None,
             samples: 1,
             output: "main".into(),
+            tiles: [1, 1],
             parameters: vec![],
             cancellation: Cancellation::default(),
         }
@@ -163,9 +168,12 @@ impl RenderOptions {
         if !(1..=8).contains(&self.samples) {
             return Err("samples per axis must be between 1 and 8".into());
         }
+        if self.tiles.iter().any(|n| !(1..=256).contains(n)) {
+            return Err("tiles per axis must be between 1 and 256".into());
+        }
         let view = self
             .precise_viewport
-            .unwrap_or_else(|| self.viewport.unwrap_or(program.viewbox).map(f64::from));
+            .unwrap_or_else(|| self.view(program).map(f64::from));
         let unit = (view[2] / f64::from(self.width)).max(view[3] / f64::from(self.height));
         if !view.iter().all(|v| v.is_finite())
             || view[2] <= 0.
@@ -190,13 +198,7 @@ impl RenderOptions {
             }
         }
         if self.precise_viewport.is_none()
-            && Mapping::new(
-                self.viewport.unwrap_or(program.viewbox),
-                self.width,
-                self.height,
-            )
-            .units_per_pixel
-                <= 0.
+            && Mapping::new(self.view(program), self.width, self.height).units_per_pixel <= 0.
         {
             return Err("viewport sampling width underflows f32; use precise_viewport".into());
         }
@@ -208,6 +210,18 @@ impl RenderOptions {
         }
         program.output(&self.output)?;
         Ok(())
+    }
+    /// The document-space rectangle the image shows: the viewport, or the view
+    /// box widened to span [`Self::tiles`].
+    pub fn view(&self, program: &Program) -> [f32; 4] {
+        self.viewport.unwrap_or_else(|| {
+            let [x, y, w, h] = program.viewbox;
+            [x, y, w * self.tiles[0] as f32, h * self.tiles[1] as f32]
+        })
+    }
+    /// [`Self::tiles`] as floats, as documents read it.
+    pub fn tile_span(&self) -> [f32; 2] {
+        self.tiles.map(|n| n as f32)
     }
     /// Return the rectangle covering the complete requested output image.
     pub fn full_region(&self) -> Region {
@@ -342,6 +356,7 @@ impl CpuProgram {
             &parameters,
             options.time,
             options.seed.unwrap_or(program.seed),
+            options.tile_span(),
             &self.plan,
         );
         let mut pixels = Vec::new();
@@ -350,11 +365,7 @@ impl CpuProgram {
             .try_reserve_exact(len)
             .map_err(|_| "unable to allocate render region")?;
         pixels.resize(len, [0.; 4]);
-        let mapping = Mapping::new(
-            options.viewport.unwrap_or(program.viewbox),
-            options.width,
-            options.height,
-        );
+        let mapping = Mapping::new(options.view(program), options.width, options.height);
         let count = (options.samples * options.samples) as f32;
         pixels
             .par_chunks_mut(region.width as usize)
@@ -408,6 +419,7 @@ impl CpuProgram {
             parameters,
             time: f64::from(options.time),
             seed: options.seed.unwrap_or(program.seed),
+            tiles: options.tile_span().map(f64::from),
         };
         let unit = (view[2] / f64::from(options.width)).max(view[3] / f64::from(options.height));
         // Keep offsets relative to the center until the final coordinate addition.
@@ -565,6 +577,7 @@ fn sample_with_plan(
         parameters,
         time,
         seed: seed.unwrap_or(program.seed),
+        tiles: [1., 1.],
     }
     .eval_with(id, p, footprint, &[], plan);
     Ok(Value {

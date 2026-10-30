@@ -80,6 +80,9 @@ pub enum NodeKind {
     Position,
     /// Time `t` in seconds, replicated across components.
     Time,
+    /// `tiles`: how many tiles of a `tile;` document a render spans before it
+    /// repeats, as a vec2 (one by one unless the host asks for more).
+    Tiles,
     /// A render-time parameter index in declaration order.
     Parameter(usize),
     /// A unary operator.
@@ -211,6 +214,8 @@ pub struct ParameterInfo {
     pub ty: Type,
     /// Validated constant default in runtime representation.
     pub default: Value,
+    /// Optional `[low, high]` range for numeric parameters, a hint for editors.
+    pub range: Option<[f32; 2]>,
 }
 /// Reusable typed graph produced by [`compile`].
 ///
@@ -348,6 +353,7 @@ impl<'a> Compiler<'a> {
             kind,
             NodeKind::Position
                 | NodeKind::Time
+                | NodeKind::Tiles
                 | NodeKind::Parameter(_)
                 | NodeKind::Local(_)
                 | NodeKind::Call(_)
@@ -428,6 +434,11 @@ impl<'a> Compiler<'a> {
                 match n.as_str() {
                     "p" => self.push(NodeKind::Position, vec![], Type::Vec2, span),
                     "t" => self.push(NodeKind::Time, vec![], Type::Float, span),
+                    // Built in unless the document declares the name itself.
+                    "tiles" if !self.declared(n) => {
+                        self.push(NodeKind::Tiles, vec![], Type::Vec2, span)
+                    }
+                    "tile_id" if !self.declared(n) => self.tile_id(span),
                     "pi" => self.literal(Value::float(std::f32::consts::PI), span),
                     "tau" => self.literal(Value::float(std::f32::consts::TAU), span),
                     _ => self.resolve(n, span),
@@ -692,6 +703,29 @@ impl<'a> Compiler<'a> {
                 self.push(NodeKind::Builtin(op.op), ids, ty, span)
             }
         }
+    }
+    fn declared(&self, name: &str) -> bool {
+        self.resolved.contains_key(name) || self.doc.declarations.iter().any(|d| d.name == name)
+    }
+    // `tile_id`: which tile of the view box `p` lies in, as whole numbers from zero.
+    fn tile_id(&mut self, span: Span) -> Result<usize, Diagnostic> {
+        let [x, y, w, h] = self.program.viewbox;
+        let p = self.push(NodeKind::Position, vec![], Type::Vec2, span)?;
+        let origin = self.literal(Value::vec2(x, y), span)?;
+        let size = self.literal(Value::vec2(w, h), span)?;
+        let offset = self.push(
+            NodeKind::Binary(BinaryOp::Sub),
+            vec![p, origin],
+            Type::Vec2,
+            span,
+        )?;
+        let cells = self.push(
+            NodeKind::Binary(BinaryOp::Div),
+            vec![offset, size],
+            Type::Vec2,
+            span,
+        )?;
+        self.push(NodeKind::Builtin(Op::Floor), vec![cells], Type::Vec2, span)
     }
     // Store a scalar or vector output as an opaque color: float as grey, vec2 in red/green.
     fn data_color(&mut self, id: usize, span: Span) -> Result<usize, Diagnostic> {
@@ -1168,6 +1202,17 @@ pub fn compile(doc: &Document) -> Result<Program, Diagnostic> {
         if param.ty == Type::Int && value.data[0].fract() != 0. {
             return Err(c.err(param.span, "integer parameter default must be integral"));
         }
+        if let Some([low, high]) = param.range {
+            if !matches!(param.ty, Type::Float | Type::Int) || low >= high {
+                return Err(c.err(
+                    param.span,
+                    "a parameter range needs a number type and LOW < HIGH",
+                ));
+            }
+            if !(low..=high).contains(&value.data[0]) {
+                return Err(c.err(param.span, "parameter default lies outside its range"));
+            }
+        }
         let index = c.program.parameters.len();
         c.program.parameters.push(ParameterInfo {
             name: param.name.clone(),
@@ -1176,6 +1221,7 @@ pub fn compile(doc: &Document) -> Result<Program, Diagnostic> {
                 ty: param.ty,
                 ..value
             },
+            range: param.range,
         });
         let id = c.push(NodeKind::Parameter(index), vec![], param.ty, param.span)?;
         c.resolved.insert(param.name.clone(), id);

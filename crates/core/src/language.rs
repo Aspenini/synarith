@@ -126,6 +126,8 @@ pub struct Parameter {
     pub ty: Type,
     /// Constant default expression, checked during compilation.
     pub default: Expr,
+    /// Optional `in LOW..HIGH` range for numeric parameters, a hint for editors.
+    pub range: Option<[f32; 2]>,
     /// Byte range of the parameter declaration.
     pub span: Span,
 }
@@ -887,11 +889,21 @@ pub fn parse(source: &str) -> Result<Document, Diagnostic> {
                 let ty = p.ty()?;
                 p.expect("=")?;
                 let default = p.expr(0)?;
+                let range = if p.token().kind == TokenKind::Ident("in".into()) {
+                    p.take();
+                    let low = p.signed_number()?;
+                    p.expect("..")?;
+                    let high = p.signed_number()?;
+                    Some([low, high])
+                } else {
+                    None
+                };
                 p.expect(";")?;
                 doc.parameters.push(Parameter {
                     name,
                     ty,
                     default,
+                    range,
                     span: Span {
                         start,
                         end: p.tokens[p.index - 1].span.end,

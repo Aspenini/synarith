@@ -285,3 +285,128 @@ fn mip_levels_halve_to_one_pixel_and_render_from_the_document() {
         assert_eq!(image.rgba(Channel::Albedo).unwrap().len(), len);
     }
 }
+
+#[test]
+fn a_tile_span_varies_each_tile_and_repeats_after_the_span() {
+    let program = load(TILES).unwrap();
+    let span = RenderOptions {
+        width: 32,
+        height: 32,
+        tiles: [2, 2],
+        ..Default::default()
+    };
+    let image = render_material(&program, &span, span.full_region()).unwrap();
+    let albedo = image.rgba(Channel::Albedo).unwrap();
+    // The four tiles differ: noise and per-cell randomness span the whole 2x2.
+    let quadrant = |qx: usize, qy: usize| -> Vec<Pixel> {
+        (0..16)
+            .flat_map(|y| (0..16).map(move |x| albedo[(qy * 16 + y) * 32 + qx * 16 + x]))
+            .collect()
+    };
+    assert!(max_difference(&quadrant(0, 0), &quadrant(1, 0)) > 0.01);
+    assert!(max_difference(&quadrant(0, 0), &quadrant(0, 1)) > 0.01);
+    // ...yet the span itself repeats: shifting the view by a whole span changes nothing.
+    let shifted = RenderOptions {
+        viewport: Some([2., -2., 2., 2.]),
+        ..span.clone()
+    };
+    let moved = render_material(&program, &shifted, shifted.full_region()).unwrap();
+    for ((channel, a), (_, b)) in image.channels.iter().zip(&moved.channels) {
+        assert!(
+            max_difference(&a.to_pixels(), &b.to_pixels()) < 1e-4,
+            "{channel}"
+        );
+    }
+    // One tile is the default, and a one-tile span matches it exactly.
+    let one = options(16);
+    let single = render_material(&program, &one, one.full_region()).unwrap();
+    let explicit = RenderOptions {
+        tiles: [1, 1],
+        ..one.clone()
+    };
+    let again = render_material(&program, &explicit, explicit.full_region()).unwrap();
+    assert_eq!(
+        single.rgba(Channel::Albedo).unwrap(),
+        again.rgba(Channel::Albedo).unwrap()
+    );
+}
+
+#[test]
+fn tile_id_and_tiles_report_the_span() {
+    let program = load("syar 1;tile;output id=tile_id;output span=tiles;").unwrap();
+    let options = RenderOptions {
+        width: 6,
+        height: 4,
+        tiles: [3, 2],
+        output: "id".into(),
+        ..Default::default()
+    };
+    let ids = render(&program, &options).unwrap();
+    for y in 0..4 {
+        for x in 0..6 {
+            assert_eq!(
+                ids[y * 6 + x],
+                [(x / 2) as f32, (y / 2) as f32, 0., 1.],
+                "{x},{y}"
+            );
+        }
+    }
+    let span = render(
+        &program,
+        &RenderOptions {
+            output: "span".into(),
+            ..options.clone()
+        },
+    )
+    .unwrap();
+    assert_eq!(span[0], [3., 2., 0., 1.]);
+    // A document's own declarations keep those names.
+    let own =
+        load("syar 1;let tiles=0.25;let tile_id=0.5;output main=rgba(tiles,tile_id,0);").unwrap();
+    let pixel = render(
+        &own,
+        &RenderOptions {
+            width: 1,
+            height: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(pixel[0], [0.25, 0.5, 0., 1.]);
+    assert!(
+        render(
+            &program,
+            &RenderOptions {
+                tiles: [0, 1],
+                ..options
+            }
+        )
+        .unwrap_err()
+        .contains("tiles")
+    );
+}
+
+#[test]
+fn parameter_ranges_are_checked_hints() {
+    let program = load("syar 1;param wear:float=0.25 in 0..1;param rows:int=3 in 1..12;param tint:color=rgba(1,0,0);output main=rgba(wear,0,0);").unwrap();
+    assert_eq!(program.parameters[0].range, Some([0., 1.]));
+    assert_eq!(program.parameters[1].range, Some([1., 12.]));
+    assert_eq!(program.parameters[2].range, None);
+    for (source, message) in [
+        (
+            "syar 1;param a:float=2.0 in 0..1;output main=rgba(a,0,0);",
+            "outside its range",
+        ),
+        (
+            "syar 1;param a:float=0.5 in 1..0;output main=rgba(a,0,0);",
+            "LOW < HIGH",
+        ),
+        (
+            "syar 1;param a:color=rgba(1,0,0) in 0..1;output main=a;",
+            "number type",
+        ),
+    ] {
+        let error = load(source).unwrap_err().message;
+        assert!(error.contains(message), "{source}: {error}");
+    }
+}

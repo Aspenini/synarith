@@ -171,6 +171,7 @@ fn batched_renders_equal_the_per_sample_interpreter() {
                                     parameters: &parameters,
                                     time: 0.7,
                                     seed: p.seed,
+                                    tiles: [1., 1.],
                                 };
                                 let id = p.output(output).unwrap();
                                 let value = evaluator.eval(
