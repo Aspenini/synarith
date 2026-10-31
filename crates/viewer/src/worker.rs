@@ -7,8 +7,11 @@ use std::{
     time::{Duration, Instant},
 };
 use synarith::{
-    Backend, Cancellation, ImageFormat, ParameterInfo, RenderOptions, Renderer, encode_rgba8, load,
+    Backend, Cancellation, ImageFormat, MaterialPixels, ParameterInfo, RenderOptions, Renderer,
+    encode_rgba8, load,
 };
+
+use crate::lit::{self, Lighting, Shape};
 
 /// A successfully compiled document, ready for playback.
 #[derive(Clone, Debug)]
@@ -25,6 +28,10 @@ pub struct DocumentInfo {
     pub outputs: Vec<String>,
     /// Exposed parameters and typed defaults.
     pub parameters: Vec<ParameterInfo>,
+    /// The document declares a material, so it has a lit preview.
+    pub material: bool,
+    /// The document declares `tile;`, so it can span several tiles.
+    pub tile: bool,
     /// Whether this was a reload rather than opening a different document.
     pub reloaded: bool,
 }
@@ -37,6 +44,8 @@ pub struct FrameRequest {
     pub generation: u64,
     /// Camera, dimensions, time, parameters, and quality.
     pub options: RenderOptions,
+    /// Shade the document's material instead of showing an output.
+    pub lighting: Option<Lighting>,
 }
 /// A rendered in-memory frame.
 #[derive(Debug)]
@@ -182,6 +191,8 @@ fn open(
         viewbox: program.viewbox,
         outputs: program.outputs.keys().cloned().collect(),
         parameters: program.parameters.clone(),
+        material: program.material.is_some(),
+        tile: program.tile,
         reloaded,
     };
     let renderer = Renderer::with_backend(program, backend)?;
@@ -196,6 +207,71 @@ fn open(
         info,
     ))
 }
+/// The last rendered material channels, reused while only the light changes.
+#[derive(Default)]
+struct ChannelCache {
+    key: String,
+    pixels: Option<MaterialPixels>,
+}
+
+// What a lit frame's channels depend on: everything but the light.
+fn channel_key(generation: u64, options: &RenderOptions) -> String {
+    format!(
+        "{generation} {}x{} {:?} {} {:?} {} {:?} {:?}",
+        options.width,
+        options.height,
+        options.viewport,
+        options.time,
+        options.seed,
+        options.samples,
+        options.tiles,
+        options
+            .parameters
+            .iter()
+            .map(|v| v.data)
+            .collect::<Vec<_>>(),
+    )
+}
+
+// Shade a document's material for a lit frame `options.width` × `options.height`.
+fn lit_rgba(
+    doc: &mut DocumentState,
+    options: &RenderOptions,
+    lighting: &Lighting,
+    cache: &mut ChannelCache,
+) -> Result<Vec<u8>, String> {
+    // A sphere wraps a texture of the whole span; a surface follows the camera.
+    let channels = match lighting.shape {
+        Shape::Surface => RenderOptions {
+            precise_viewport: None,
+            ..options.clone()
+        },
+        Shape::Sphere => RenderOptions {
+            width: lit::SPHERE_TEXTURE,
+            height: lit::SPHERE_TEXTURE,
+            viewport: None,
+            precise_viewport: None,
+            ..options.clone()
+        },
+    };
+    let key = channel_key(doc.generation, &channels);
+    if cache.key != key || cache.pixels.is_none() {
+        cache.pixels = Some(doc.renderer.render_material(&channels)?);
+        cache.key = key;
+    }
+    let pixels = cache.pixels.as_ref().expect("rendered above");
+    Ok(match lighting.shape {
+        Shape::Surface => lit::shade_surface(pixels, lighting),
+        Shape::Sphere => lit::shade_sphere(
+            pixels,
+            options.tiles[0],
+            options.width,
+            options.height,
+            lighting,
+        ),
+    })
+}
+
 fn read_source(path: &std::path::Path) -> Result<String, String> {
     let mut source = String::new();
     std::fs::File::open(path)
@@ -216,6 +292,7 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, events: mpsc::Sender<WorkerEvent>
     let mut generation = 0;
     let mut backend = Backend::Auto;
     let mut checked = Instant::now();
+    let mut channels = ChannelCache::default();
     loop {
         let control;
         let frame;
@@ -287,13 +364,26 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, events: mpsc::Sender<WorkerEvent>
                         }
                         shared.0.lock().unwrap().active =
                             Some(request.options.cancellation.clone());
-                        doc.renderer.export_image(
-                            &request.options,
-                            &path,
-                            format,
-                            quality,
-                            false,
-                        )?;
+                        match &request.lighting {
+                            // The lit preview saves what it shows, in the chosen format.
+                            Some(lighting) => {
+                                if path.exists() {
+                                    return Err(format!("{} already exists", path.display()));
+                                }
+                                let (w, h) = (request.options.width, request.options.height);
+                                let rgba =
+                                    lit_rgba(doc, &request.options, lighting, &mut channels)?;
+                                image::save_buffer(&path, &rgba, w, h, image::ColorType::Rgba8)
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            None => doc.renderer.export_image(
+                                &request.options,
+                                &path,
+                                format,
+                                quality,
+                                false,
+                            )?,
+                        }
                         let _ = events.send(WorkerEvent::Exported(path));
                     }
                 }
@@ -332,23 +422,29 @@ fn run(shared: Arc<(Mutex<Mailbox>, Condvar)>, events: mpsc::Sender<WorkerEvent>
                     return Err("render cancelled: source changed".into());
                 }
                 let start = Instant::now();
-                // Previews have a bounded canvas-sized region. Dispatch it once;
-                // still exports retain the library's streaming strip path.
-                let pixels = doc
-                    .renderer
-                    .render_region(&request.options, request.options.full_region())?;
+                let rgba = match &request.lighting {
+                    Some(lighting) => lit_rgba(doc, &request.options, lighting, &mut channels)?,
+                    None => {
+                        // Previews have a bounded canvas-sized region. Dispatch it once;
+                        // still exports retain the library's streaming strip path.
+                        let pixels = doc
+                            .renderer
+                            .render_region(&request.options, request.options.full_region())?;
+                        // Data outputs (roughness, normals) are shown as their linear values.
+                        let kind = doc
+                            .renderer
+                            .program()
+                            .output_kind(&request.options.output)?;
+                        encode_rgba8(kind, &pixels)
+                    }
+                };
                 let warnings = doc.renderer.take_warnings();
                 if !warnings.is_empty() {
                     doc.notice = warnings.join("; ");
                 }
-                // Data outputs (roughness, normals) are shown as their linear values.
-                let kind = doc
-                    .renderer
-                    .program()
-                    .output_kind(&request.options.output)?;
                 Ok(LiveFrame {
                     request,
-                    rgba: encode_rgba8(kind, &pixels),
+                    rgba,
                     elapsed: start.elapsed(),
                     backend: format!(
                         "{}{}",

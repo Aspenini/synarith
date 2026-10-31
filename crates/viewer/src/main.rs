@@ -7,6 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 use synarith::{Backend, ImageFormat, RenderOptions, Type, Value, parameter_value};
+use synarith_viewer::lit::{Lighting, Shape};
 use synarith_viewer::{Camera, DocumentInfo, FrameRequest, LiveWorker, Timeline, WorkerEvent};
 
 const FORMATS: [(&str, ImageFormat); 5] = [
@@ -36,6 +37,13 @@ struct Viewer {
     overrides: std::collections::BTreeSet<String>,
     parameter_text: Vec<String>,
     output: String,
+    /// Show the document's material lit, instead of an output.
+    lit: bool,
+    lighting: Lighting,
+    /// Circle the light around the material.
+    orbit: bool,
+    /// Tiles of a `tile;` document to span (its Variety in a game).
+    tiles: u32,
     backend: Backend,
     revision: u64,
     in_flight: bool,
@@ -63,7 +71,7 @@ struct Viewer {
     smoke: Option<Smoke>,
 }
 impl Viewer {
-    fn new(file: Option<PathBuf>, smoke: Option<Smoke>, paused: bool) -> Self {
+    fn new(file: Option<PathBuf>, smoke: Option<Smoke>, paused: bool, sphere: bool) -> Self {
         let has_file = file.is_some();
         let worker = LiveWorker::new();
         if let Some(path) = file {
@@ -82,6 +90,17 @@ impl Viewer {
             overrides: Default::default(),
             parameter_text: vec![],
             output: "main".into(),
+            lit: false,
+            lighting: Lighting {
+                shape: if sphere {
+                    Shape::Sphere
+                } else {
+                    Shape::Surface
+                },
+                ..Default::default()
+            },
+            orbit: false,
+            tiles: 1,
             backend: Backend::Auto,
             revision: 1,
             in_flight: false,
@@ -116,8 +135,14 @@ impl Viewer {
         self.dirty = true;
         self.error = false;
     }
+    // The view a tile span covers, so Fit shows all of it.
+    fn span_view(&self, viewbox: [f32; 4]) -> [f32; 4] {
+        let t = self.tiles as f32;
+        [viewbox[0], viewbox[1], viewbox[2] * t, viewbox[3] * t]
+    }
     fn request(&self, width: u32, height: u32) -> Option<FrameRequest> {
         let doc = self.document.as_ref()?;
+        let lighting = (self.lit && doc.material).then_some(self.lighting);
         let samples = if self.timeline.playing || self.navigating {
             1
         } else {
@@ -131,24 +156,26 @@ impl Viewer {
                 height,
                 time: self.timeline.time as f32,
                 viewport: Some(self.camera.viewport([self.canvas[2], self.canvas[3]])),
-                precise_viewport: self
-                    .camera
-                    .precision_for(
+                // Lit previews shade f32 material channels; deep zoom is for outputs.
+                precise_viewport: (lighting.is_none()
+                    && self.camera.precision_for(
                         [self.canvas[2], self.canvas[3]],
                         [
                             width.saturating_mul(samples),
                             height.saturating_mul(samples),
                         ],
-                    )
-                    .then(|| {
-                        self.camera
-                            .precise_viewport([self.canvas[2], self.canvas[3]])
-                    }),
+                    ))
+                .then(|| {
+                    self.camera
+                        .precise_viewport([self.canvas[2], self.canvas[3]])
+                }),
                 samples,
                 output: self.output.clone(),
+                tiles: [if doc.tile { self.tiles } else { 1 }; 2],
                 parameters: self.parameters.clone(),
                 ..Default::default()
             },
+            lighting,
         })
     }
     fn tick(&mut self, ctx: &egui::Context) {
@@ -156,6 +183,11 @@ impl Viewer {
         let dt = now.duration_since(self.last_tick).as_secs_f64();
         self.last_tick = now;
         self.timeline.advance(dt);
+        if self.orbit && self.lit && self.document.as_ref().is_some_and(|d| d.material) {
+            // Only the shading changes; the worker reuses the rendered channels.
+            self.lighting.azimuth = (self.lighting.azimuth + 40. * dt as f32).rem_euclid(360.);
+            self.dirty = true;
+        }
         let moving = self.camera.advance(dt);
         self.dirty |= moving || (self.navigating && !moving) || self.timeline.playing;
         self.navigating = moving;
@@ -176,7 +208,11 @@ impl Viewer {
                         self.camera = Camera::new(doc.viewbox);
                     }
                     if !doc.reloaded {
-                        self.camera = Camera::new(doc.viewbox);
+                        self.lit = doc.material;
+                        if !doc.tile {
+                            self.tiles = 1;
+                        }
+                        self.camera = Camera::new(self.span_view(doc.viewbox));
                         self.timeline.seek(0.);
                         self.output = if doc.outputs.iter().any(|v| v == "main") {
                             "main".into()
@@ -205,6 +241,7 @@ impl Viewer {
                     if !doc.outputs.contains(&self.output) {
                         self.output = doc.outputs[0].clone();
                     }
+                    self.lit &= doc.material;
                     self.parameter_text =
                         self.parameters.iter().copied().map(Self::value).collect();
                     self.document = Some(doc);
@@ -313,7 +350,7 @@ impl Viewer {
                 self.dirty = false;
             }
         }
-        if changed || self.timeline.playing {
+        if changed || self.timeline.playing || (self.orbit && self.lit) {
             ctx.request_repaint();
         }
     }
@@ -541,11 +578,37 @@ impl Viewer {
                 ui.heading("Document");
                 if let Some(doc)=&self.document {ui.label(doc.path.display().to_string());}
                 let mut changed=false;
-                egui::ComboBox::from_label("Output").selected_text(&self.output).show_ui(ui,|ui| {
-                    if let Some(doc)=&self.document {for output in &doc.outputs {
-                        changed|=ui.selectable_value(&mut self.output,output.clone(),output).changed();
-                    }}
+                let selected=if self.lit {"Lit material".to_string()} else {self.output.clone()};
+                egui::ComboBox::from_label("Output").selected_text(selected).show_ui(ui,|ui| {
+                    if let Some(doc)=&self.document {
+                        if doc.material && ui.selectable_label(self.lit,"Lit material").clicked() {self.lit=true; changed=true;}
+                        for output in &doc.outputs {
+                            if ui.selectable_label(!self.lit && self.output==*output,output).clicked() {
+                                self.output=output.clone(); self.lit=false; changed=true;
+                            }
+                        }
+                    }
                 });
+                if self.lit {
+                    ui.separator(); ui.heading("Lighting");
+                    ui.horizontal(|ui| {
+                        changed|=ui.radio_value(&mut self.lighting.shape,Shape::Surface,"Surface").changed();
+                        changed|=ui.radio_value(&mut self.lighting.shape,Shape::Sphere,"Sphere").changed();
+                    });
+                    changed|=ui.add(egui::Slider::new(&mut self.lighting.azimuth,0.0..=360.0).text("Light direction").suffix("°")).changed();
+                    changed|=ui.add(egui::Slider::new(&mut self.lighting.elevation,3.0..=90.0).text("Light height").suffix("°")).changed();
+                    ui.checkbox(&mut self.orbit,"Orbit light");
+                    ui.small("Shaded like a game engine: relief from the height, roughness, metal, occlusion and glow. Moving the light reuses the rendered channels.");
+                }
+                if let Some(doc)=&self.document && doc.tile {
+                    let before=self.tiles;
+                    ui.add(egui::Slider::new(&mut self.tiles,1..=4).text("Tiles"));
+                    if self.tiles!=before {
+                        self.camera=Camera::new(self.span_view(doc.viewbox));
+                        changed=true;
+                    }
+                    ui.small("How many tiles the pattern spans before it repeats (Variety in DREAMSCAPES).");
+                }
                 let old_backend=self.backend;
                 egui::ComboBox::from_label("Backend").selected_text(format!("{:?}",self.backend)).show_ui(ui,|ui| {
                     for b in [Backend::Auto,Backend::Cpu,Backend::Gpu] {ui.selectable_value(&mut self.backend,b,format!("{b:?}"));}
@@ -635,7 +698,15 @@ Space: play/pause · R: restart
                 if previous != [self.canvas[2], self.canvas[3]] {
                     self.dirty = true;
                 }
-                if let Some(texture) = &self.image {
+                let sphere = self.lit && self.lighting.shape == Shape::Sphere;
+                if let (Some(texture), true) = (&self.image, sphere) {
+                    ui.painter().image(
+                        texture.id(),
+                        rect,
+                        egui::Rect::from_min_max(egui::pos2(0., 0.), egui::pos2(1., 1.)),
+                        egui::Color32::WHITE,
+                    );
+                } else if let Some(texture) = &self.image {
                     let current = self
                         .camera
                         .precise_viewport([self.canvas[2], self.canvas[3]]);
@@ -687,7 +758,7 @@ Space: play/pause · R: restart
                         self.open_dialog();
                     }
                 }
-                if response.dragged() {
+                if response.dragged() && !sphere {
                     let d = ui.input(|i| i.pointer.delta());
                     if !self.navigating && d != egui::Vec2::ZERO {
                         self.invalidate();
@@ -701,7 +772,7 @@ Space: play/pause · R: restart
                     self.camera.reset();
                     self.dirty = true;
                 }
-                if response.hovered() {
+                if response.hovered() && !sphere {
                     let (wheel, pinch, pos) = ui.input(|i| {
                         (
                             i.smooth_scroll_delta.y,
@@ -774,6 +845,7 @@ fn run() -> Result<(), String> {
     let mut snapshot = None;
     let mut export = None;
     let mut paused = false;
+    let mut sphere = false;
     let mut smoke_zoom = 2.0f64;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {
@@ -804,9 +876,10 @@ fn run() -> Result<(), String> {
                 }
             }
             Some("--paused") => paused = true,
+            Some("--sphere") => sphere = true,
             Some("--help") => {
                 println!(
-                    "syar-view [FILE.syar] [--paused]\nEgui live rendering; watches source edits. Scroll zoom, drag pan, Space play/pause, R restart, 0 fit.\nDeveloper workflow: --smoke-test FILE --snapshot CANVAS.png --export-test OUTPUT.png [--smoke-zoom FACTOR]"
+                    "syar-view [FILE.syar] [--paused] [--sphere]\nEgui live rendering; watches source edits. Scroll zoom, drag pan, Space play/pause, R restart, 0 fit.\nMaterial documents open lit; --sphere shows them on a ball.\nDeveloper workflow: --smoke-test FILE --snapshot CANVAS.png --export-test OUTPUT.png [--smoke-zoom FACTOR]"
                 );
                 return Ok(());
             }
@@ -841,7 +914,7 @@ fn run() -> Result<(), String> {
                 started: Instant::now(),
                 outcome,
             });
-            Ok(Box::new(Viewer::new(file, smoke, paused)))
+            Ok(Box::new(Viewer::new(file, smoke, paused, sphere)))
         }),
     )
     .map_err(|e| e.to_string())?;

@@ -42,6 +42,7 @@ fn request(generation: u64, time: f32) -> FrameRequest {
             time,
             ..Default::default()
         },
+        lighting: None,
     }
 }
 
@@ -210,4 +211,57 @@ fn pending_requests_are_bounded_and_obsolete_generations_are_discarded() {
     }
     worker.render(request(doc.generation + 1, 0.), false);
     assert!(matches!(event(&worker), WorkerEvent::Cancelled));
+}
+
+#[test]
+fn material_documents_preview_lit_on_a_surface_and_a_sphere() {
+    let worker = LiveWorker::new();
+    worker.open_source(
+        "tiles.syar".into(),
+        Arc::from(
+            "syar 1;use std;tile;let h=tile_fbm(p,4.0,octaves:3);material{albedo=rgba(0.6,0.4,0.3);height=h*0.01;roughness=0.5;}",
+        ),
+    );
+    let doc = loaded(&worker);
+    assert!(doc.material && doc.tile);
+    let lit = |lighting: synarith_viewer::lit::Lighting| {
+        let mut r = request(doc.generation, 0.);
+        r.options.tiles = [2, 2];
+        r.lighting = Some(lighting);
+        worker.render(r, false);
+        frame(&worker).rgba
+    };
+    use synarith_viewer::lit::{Lighting, Shape};
+    let left = lit(Lighting {
+        azimuth: 180.,
+        ..Default::default()
+    });
+    let right = lit(Lighting {
+        azimuth: 0.,
+        ..Default::default()
+    });
+    assert_eq!(left.len(), 24 * 16 * 4);
+    assert_ne!(left, right, "moving the light changes the shading");
+    let ball = lit(Lighting {
+        shape: Shape::Sphere,
+        ..Default::default()
+    });
+    assert_eq!(ball.len(), 24 * 16 * 4);
+    // Exporting the lit preview saves what it shows.
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("lit.png");
+    let mut r = request(doc.generation, 0.);
+    r.lighting = Some(Lighting::default());
+    worker.export(path.clone(), ImageFormat::Png, 90, r);
+    loop {
+        match event(&worker) {
+            WorkerEvent::Exported(p) => {
+                assert_eq!(p, path);
+                break;
+            }
+            WorkerEvent::Error(e) => panic!("{e}"),
+            _ => (),
+        }
+    }
+    assert_eq!(image::open(&path).unwrap().width(), 24);
 }

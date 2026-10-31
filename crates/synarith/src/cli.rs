@@ -33,7 +33,9 @@
 //! axis. PNG/BMP/TGA retain alpha; JPEG/PPM composite over white in linear light.
 //! Animation continues to write PNG sequences.
 //!
-//! `syar-view [FILE.syar] [--paused]` launches the egui live viewer. It renders
+//! `syar-view [FILE.syar] [--paused] [--sphere]` launches the egui live viewer.
+//! Material documents open as a lit preview, on a surface or (`--sphere`) a ball,
+//! with an adjustable or orbiting light and a tile-span slider. It renders
 //! directly through the Rust library, watches source changes, plays time expressions
 //! continuously, and supports smooth mathematical zoom/pan and still exports.
 //! Scroll/pinch to zoom, drag to pan, Space to play/pause, R to restart, 0 to fit.

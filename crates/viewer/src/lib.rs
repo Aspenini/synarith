@@ -7,8 +7,11 @@
 //! f64; normal views use the f32 CPU/GPU path, with automatic f64 CPU arithmetic
 //! for deeper camera views. Compiled constants and parameter values retain f32
 //! representation. No examples or algorithm presets are embedded in the UI.
+//! Material documents can be previewed lit ([`lit`]), on a surface or a sphere;
+//! the worker keeps the rendered channels so a moving light only re-shades.
 #![deny(missing_docs)]
 mod camera;
+pub mod lit;
 mod worker;
 pub use camera::*;
 pub use worker::*;
